@@ -883,7 +883,7 @@ public class AMHSMessageUI extends JFrame {
         if (SettingsDialog.isClearOldLogsOnSend() && markingPanel != null) {
             markingPanel.clearSentMessages();
         }
-
+        // defaul send successfully.
         logSend(recipient, subject, content, priority, true, amhsDefaults);
         appendOutput("Sending message…");
 

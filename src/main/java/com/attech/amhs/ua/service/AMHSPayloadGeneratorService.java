@@ -1312,7 +1312,8 @@ public class AMHSPayloadGeneratorService {
 
     private String formatCurrentFilingTime() {
         LocalDateTime now = LocalDateTime.now();
-        DateTimeFormatter formatter = DateTimeFormatter.ofPattern("yyMMddHHmm");
+        // set filing time to ddHHmm format
+        DateTimeFormatter formatter = DateTimeFormatter.ofPattern("ddHHmm");
         return now.format(formatter);
     }
 
