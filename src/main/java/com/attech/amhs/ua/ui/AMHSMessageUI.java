@@ -188,6 +188,7 @@ public class AMHSMessageUI extends JFrame {
         // LEFT panel
         selectorPanel = new TestCaseSelectorPanel(repository);
         selectorPanel.setDescriptionPanel(descriptionPanel); // Set reference to display descriptions
+        selectorPanel.addSelectionChangedListener("main", this::handleLoadDefaultsForSubcase);
         selectorPanel.addDefaultsLoadedListener("main", this::handleLoadDefaultsForSubcase);
         selectorPanel.addSendDefaultsListener("main", this::handleSendDefaults);
         selectorPanel.addSendAllSubcasesListener("main", this::handleSendAllSubcases);
@@ -419,6 +420,7 @@ public class AMHSMessageUI extends JFrame {
                 "6", "106", "3", "4", "8"
         });
         comboCharset.setSelectedItem("6");
+        comboCharset.setEditable(true);
         comboCharset.setToolTipText("Charset registry number (6=IA5, 106=UTF-8)");
         panel.add(comboCharset, gbc);
 
@@ -435,6 +437,7 @@ public class AMHSMessageUI extends JFrame {
                 "22", "0", "1", "2"
         });
         comboContentType.setSelectedItem("22");
+        comboContentType.setEditable(true);
         comboContentType.setToolTipText("X.400 Content Type (22=AMHS)");
         panel.add(comboContentType, gbc);
 
@@ -463,6 +466,7 @@ public class AMHSMessageUI extends JFrame {
                 "ia5-text", "general-text-body-part", "file-transfer-body-part"
         });
         comboBodyPartType.setSelectedItem("ia5-text");
+        comboBodyPartType.setEditable(true);
         comboBodyPartType.setToolTipText("Body part type for the message");
         panel.add(comboBodyPartType, gbc);
 
@@ -817,48 +821,6 @@ public class AMHSMessageUI extends JFrame {
         String content = txtContent.getText().trim();
         X400_Priority priority = (X400_Priority) comboPriority.getSelectedItem();
 
-        // Collect AMHS-specific fields from UI
-        Map<String, String> uiAmhsFields = new java.util.HashMap<>();
-        String ohi = txtOHI.getText().trim();
-        if (!ohi.isEmpty())
-            uiAmhsFields.put("optional-heading-info", ohi);
-        String atsPriority = txtATSPriority.getText().trim();
-        if (!atsPriority.isEmpty())
-            uiAmhsFields.put("ats-priority", atsPriority);
-        String encoding = (String) comboEncoding.getSelectedItem();
-        if (encoding != null) {
-            uiAmhsFields.put("encoding", encoding);
-            // Map "General Text" encoding to body-part-type
-            if ("General Text".equals(encoding)) {
-                uiAmhsFields.put("body-part-type", "general-text-body-part");
-            }
-        }
-        String charset = (String) comboCharset.getSelectedItem();
-        if (charset != null)
-            uiAmhsFields.put("charset-reg-number", charset);
-        String contentType = (String) comboContentType.getSelectedItem();
-        if (contentType != null)
-            uiAmhsFields.put("content-type", contentType);
-        String atsHeader = txtATSHeader.getText().trim();
-        if (!atsHeader.isEmpty())
-            uiAmhsFields.put("ats-header", atsHeader);
-            
-        String msgType = (String) comboMsgType.getSelectedItem();
-        if ("Probe".equalsIgnoreCase(msgType)) {
-            uiAmhsFields.put("probe", "probe");
-        } else if ("RN".equalsIgnoreCase(msgType)) {
-            uiAmhsFields.put("rn", "rn");
-            uiAmhsFields.put("message-type", "rn");
-        }
-        String drReq = (String) comboDrReq.getSelectedItem();
-        if (drReq != null) {
-            uiAmhsFields.put("originator-report-request", drReq);
-        }
-        String rnReq = (String) comboRnReq.getSelectedItem();
-        if (rnReq != null) {
-            uiAmhsFields.put("receipt-notification", rnReq);
-        }
-
         if (recipient.isEmpty() || subject.isEmpty() || content.isEmpty()) {
             appendOutput("Error: Recipient, subject, and content are required.");
             return;
@@ -868,23 +830,30 @@ public class AMHSMessageUI extends JFrame {
         TestSubcase currentSubcase = getSelectedSubcase();
         Map<String, String> defaults = currentSubcase != null
                 ? new java.util.HashMap<>(currentSubcase.getAmhsDefaults())
-                : null;
+                : new java.util.HashMap<>();
 
-        // Merge UI AMHS fields with subcase defaults (UI takes precedence)
-        if (defaults == null) {
-            defaults = uiAmhsFields;
-        } else {
-            defaults.putAll(uiAmhsFields);
-        }
+        // UI values are one-time overrides. The selected TestSubcase remains unchanged.
+        // Remove aliases that otherwise take precedence over editable counterparts.
+        defaults.remove("body-part-types");
+        defaults.remove("charset-reg-numbers");
+        defaults.remove("probe");
+        defaults.remove("rn");
+        defaults.putAll(collectEditableAmhsFields(recipient, subject, content, priority));
+
+        // A manual send always uses the current filing time. Removing both keys
+        // delegates generation to AMHSPayloadGeneratorService while leaving the
+        // original TestSubcase map untouched. Default and batch sends do not use
+        // this path, so negative filing-time test cases retain their definitions.
+        defaults.remove("filing-time");
+        defaults.remove("header-empty");
 
         // Create an effectively final copy for use in lambda
         final Map<String, String> amhsDefaults = defaults;
+        final String sender = txtUserOrAddress.getText().trim();
 
         if (SettingsDialog.isClearOldLogsOnSend() && markingPanel != null) {
             markingPanel.clearSentMessages();
         }
-        // defaul send successfully.
-        logSend(recipient, subject, content, priority, true, amhsDefaults);
         appendOutput("Sending message…");
 
         new Thread(() -> {
@@ -897,13 +866,13 @@ public class AMHSMessageUI extends JFrame {
                     if (filingTime != null && !filingTime.isEmpty()) {
                         appendOutput("Filing-time used: " + filingTime);
                     }
-                    addMessageToMarkingPanel(txtUserOrAddress.getText().trim(), recipient, subject, content,
+                    addMessageToMarkingPanel(sender, recipient, subject, content,
                             priority.toString(), true, null, false, amhsDefaults, null, null);
                 });
             } catch (Throwable t) {
                 SwingUtilities.invokeLater(() -> {
                     appendOutput("Failed to send message: " + t.getMessage());
-                    addMessageToMarkingPanel(txtUserOrAddress.getText().trim(), recipient, subject, content,
+                    addMessageToMarkingPanel(sender, recipient, subject, content,
                             priority.toString(), false, t.getMessage(), false, amhsDefaults, null, null);
                 });
             }
@@ -981,10 +950,16 @@ public class AMHSMessageUI extends JFrame {
         comboPriority.setSelectedItem(X400_Priority.NORMAL_PRIORITY);
         txtATSPriority.setText("FF");
         txtOHI.setText("");
+        comboMsgType.setSelectedItem("IPM");
+        comboDrReq.setSelectedItem("NDR");
+        comboRnReq.setSelectedItem("None");
         comboEncoding.setSelectedItem("IA5");
         comboCharset.setSelectedItem("6");
         comboContentType.setSelectedItem("22");
         txtATSHeader.setText("");
+        comboBodyPartType.setSelectedItem("ia5-text");
+        txtFTBPFileName.setText("attachment.bin");
+        txtFTBPContent.setText("");
     }
 
     private void handleLoadDefaultsForSubcase() {
@@ -1007,29 +982,35 @@ public class AMHSMessageUI extends JFrame {
             appendOutput("Error: Not connected. Please connect first.");
             return;
         }
-        handleLoadDefaultsForSubcase();
+
+        TestSubcase currentSubcase = getSelectedSubcase();
+        if (currentSubcase == null || currentSubcase.getAmhsDefaults().isEmpty()) {
+            appendOutput("No configured subcase selected.");
+            return;
+        }
+
+        // Restore the form for visibility, but send an independent copy of the
+        // original definition so manual edits never alter "Send defaults".
+        Map<String, String> defaults = new java.util.HashMap<>(currentSubcase.getAmhsDefaults());
+        applyDefaults(defaults);
+
+        final String recipient = firstNonEmptyValue(defaults, "primary-recipients", "recipient");
+        final String subject = valueOrDefault(defaults.get("subject"), "Test - " + currentSubcase.getId());
+        final String content = valueOrDefault(defaults.get("content"), "Message for " + currentSubcase.getId());
+        final X400_Priority priority = toX400Priority(firstNonEmptyValue(defaults,
+                "priority", "ats-priority", "priority-indicator"));
+
+        if (recipient == null || recipient.isEmpty() || subject.isEmpty() || content.isEmpty()) {
+            appendOutput("Error: Recipient, subject, and content are required.");
+            return;
+        }
 
         if (SettingsDialog.isClearOldLogsOnSend() && markingPanel != null) {
             markingPanel.clearSentMessages();
         }
 
-        // Snapshot on EDT before thread
-        TestSubcase currentSubcase = getSelectedSubcase();
-        Map<String, String> defaults = currentSubcase != null
-                ? new java.util.HashMap<>(currentSubcase.getAmhsDefaults())
-                : null;
-
         new Thread(() -> {
             try {
-                String recipient = txtRecipient.getText().trim();
-                String subject = txtSubject.getText().trim();
-                String content = txtContent.getText().trim();
-                X400_Priority priority = (X400_Priority) comboPriority.getSelectedItem();
-                if (recipient.isEmpty() || subject.isEmpty() || content.isEmpty()) {
-                    SwingUtilities
-                            .invokeLater(() -> appendOutput("Error: Recipient, subject, and content are required."));
-                    return;
-                }
                 String msgId = messageService.sendMessage(recipient, subject, content, priority, defaults);
                 SwingUtilities.invokeLater(() -> {
                     appendOutput("Defaults sent successfully. Message ID: " + msgId);
@@ -1059,6 +1040,8 @@ public class AMHSMessageUI extends JFrame {
             markingPanel.clearSentMessages();
         }
 
+        final String fallbackRecipient = txtRecipient.getText().trim();
+
         new Thread(() -> {
             int successCount = 0;
             int failCount = 0;
@@ -1073,7 +1056,11 @@ public class AMHSMessageUI extends JFrame {
 
                 try {
                     Map<String, String> defaults = new java.util.HashMap<>(sc.getAmhsDefaults());
-                    String recipient = defaults.getOrDefault("recipient", txtRecipient.getText().trim());
+                    String resolvedRecipient = firstNonEmptyValue(defaults, "primary-recipients", "recipient");
+                    if (resolvedRecipient == null || resolvedRecipient.isEmpty()) {
+                        resolvedRecipient = fallbackRecipient;
+                    }
+                    final String recipient = resolvedRecipient;
                     String subject = defaults.getOrDefault("subject", "Test - " + sc.getId());
                     String content = defaults.getOrDefault("content", "Message for " + sc.getId());
 
@@ -1126,76 +1113,149 @@ public class AMHSMessageUI extends JFrame {
         }).start();
     }
 
-    private void applyDefaults(Map<String, String> defaults) {
-        if (defaults.containsKey("recipient"))
-            txtRecipient.setText(defaults.get("recipient"));
-        if (defaults.containsKey("subject"))
-            txtSubject.setText(defaults.get("subject"));
-        if (defaults.containsKey("content"))
-            txtContent.setText(defaults.get("content"));
-        if (defaults.containsKey("priority")) {
-            String p = defaults.get("priority");
-            // Handle ICAO ATS priority codes and generic priority levels
-            if ("KK".equalsIgnoreCase(p) || "GG".equalsIgnoreCase(p) || "HIGH".equalsIgnoreCase(p)
-                    || "URGENT".equalsIgnoreCase(p))
-                comboPriority.setSelectedItem(X400_Priority.HIGH_PRIORITY);
-            else if ("FF".equalsIgnoreCase(p) || "NORMAL".equalsIgnoreCase(p))
-                comboPriority.setSelectedItem(X400_Priority.NORMAL_PRIORITY);
-            else if ("DD".equalsIgnoreCase(p) || "LOW".equalsIgnoreCase(p))
-                comboPriority.setSelectedItem(X400_Priority.LOW_PRIORITY);
-            else if ("SS".equalsIgnoreCase(p))
-                comboPriority.setSelectedItem(X400_Priority.HIGH_PRIORITY);
-            else
-                comboPriority.setSelectedItem(X400_Priority.NORMAL_PRIORITY);
+    /** Collects the editable form as per-send overrides without mutating a subcase. */
+    private Map<String, String> collectEditableAmhsFields(String recipient, String subject,
+            String content, X400_Priority priority) {
+        Map<String, String> fields = new java.util.HashMap<>();
+        fields.put("recipient", recipient);
+        fields.put("primary-recipients", recipient);
+        fields.put("subject", subject);
+        fields.put("content", content);
+        fields.put("priority", priority != null ? priority.toString() : "NORMAL_PRIORITY");
+        fields.put("ats-priority", txtATSPriority.getText().trim());
+        fields.put("optional-heading-info", txtOHI.getText().trim());
+        fields.put("ats-header", txtATSHeader.getText().trim());
+        fields.put("encoding", valueOrDefault((String) comboEncoding.getSelectedItem(), ""));
+        fields.put("charset-reg-number", valueOrDefault((String) comboCharset.getSelectedItem(), ""));
+        fields.put("content-type", valueOrDefault((String) comboContentType.getSelectedItem(), ""));
+        fields.put("body-part-type", valueOrDefault((String) comboBodyPartType.getSelectedItem(), "ia5-text"));
+        fields.put("ftbp-file-name", txtFTBPFileName.getText().trim());
+        fields.put("ftbp-content", txtFTBPContent.getText());
+        fields.put("originator-report-request", valueOrDefault((String) comboDrReq.getSelectedItem(), "None"));
+        fields.put("receipt-notification", valueOrDefault((String) comboRnReq.getSelectedItem(), "None"));
 
-            // Also set the ATS Priority text field
-            txtATSPriority.setText(p.toUpperCase());
+        String messageType = valueOrDefault((String) comboMsgType.getSelectedItem(), "IPM").toLowerCase();
+        fields.put("message-type", messageType);
+        if ("probe".equals(messageType)) {
+            fields.put("probe", "probe");
+        } else if ("rn".equals(messageType)) {
+            fields.put("rn", "rn");
         }
-        // Apply AMHS-specific fields
-        if (defaults.containsKey("optional-heading-info"))
-            txtOHI.setText(defaults.get("optional-heading-info"));
-        if (defaults.containsKey("ats-priority"))
-            txtATSPriority.setText(defaults.get("ats-priority"));
-        else if (defaults.containsKey("priority-indicator"))
-            txtATSPriority.setText(defaults.get("priority-indicator"));
-        if (defaults.containsKey("charset-reg-number")) {
-            String cs = defaults.get("charset-reg-number");
-            if (cs != null && !cs.isEmpty()) {
-                comboCharset.setSelectedItem(cs);
+        return fields;
+    }
+
+    private String firstNonEmptyValue(Map<String, String> values, String... keys) {
+        if (values == null) {
+            return null;
+        }
+        for (String key : keys) {
+            String value = values.get(key);
+            if (value != null && !value.trim().isEmpty()) {
+                return value.trim();
             }
         }
-        if (defaults.containsKey("content-type")) {
-            String ct = defaults.get("content-type");
-            if (ct != null && !ct.isEmpty()) {
-                comboContentType.setSelectedItem(ct);
-            }
+        return null;
+    }
+
+    private String valueOrDefault(String value, String defaultValue) {
+        return value != null ? value : defaultValue;
+    }
+
+    private X400_Priority toX400Priority(String value) {
+        if (value == null) {
+            return X400_Priority.NORMAL_PRIORITY;
         }
-        if (defaults.containsKey("body-part-type")) {
-            String bpt = defaults.get("body-part-type");
-            if (bpt != null && !bpt.isEmpty()) {
-                // Map body-part-type to encoding selection
-                if ("general-text-body-part".equals(bpt.toLowerCase())) {
-                    comboEncoding.setSelectedItem("General Text");
-                } else if ("ia5-text".equals(bpt.toLowerCase())) {
-                    comboEncoding.setSelectedItem("IA5");
-                }
-            }
+        String normalized = value.trim().toUpperCase();
+        if ("KK".equals(normalized) || "GG".equals(normalized) || "SS".equals(normalized)
+                || "HIGH".equals(normalized) || "HIGH_PRIORITY".equals(normalized)
+                || "URGENT".equals(normalized)) {
+            return X400_Priority.HIGH_PRIORITY;
         }
-        if (defaults.containsKey("encoding")) {
-            String enc = defaults.get("encoding");
-            if (enc != null && !enc.isEmpty()) {
-                comboEncoding.setSelectedItem(enc);
-            }
+        if ("DD".equals(normalized) || "LOW".equals(normalized) || "LOW_PRIORITY".equals(normalized)) {
+            return X400_Priority.LOW_PRIORITY;
         }
-        if (defaults.containsKey("charset-repertoire")) {
-            String cr = defaults.get("charset-repertoire");
-            if (cr != null && !cr.isEmpty()) {
-                // Store repertoire for reference - may need UI field in future
-                logger.info("Charset repertoire from defaults: " + cr);
-            }
+        return X400_Priority.NORMAL_PRIORITY;
+    }
+
+    private String toDrSelection(String value) {
+        if (value == null) {
+            return "NDR";
         }
-        if (defaults.containsKey("ats-header"))
-            txtATSHeader.setText(defaults.get("ats-header"));
+        String normalized = value.trim().toLowerCase();
+        if ("none".equals(normalized) || "no-report".equals(normalized) || "0".equals(normalized)) {
+            return "None";
+        }
+        if ("both".equals(normalized) || "3".equals(normalized)) {
+            return "Both";
+        }
+        if ("report".equals(normalized) || "delivery-report".equals(normalized)
+                || "audited-report".equals(normalized) || "dr".equals(normalized)
+                || "2".equals(normalized)) {
+            return "DR";
+        }
+        return "NDR";
+    }
+
+    private String toRnSelection(String value) {
+        if (value == null) {
+            return "None";
+        }
+        String normalized = value.trim().toLowerCase();
+        if ("both".equals(normalized) || "3".equals(normalized)) {
+            return "Both";
+        }
+        if ("receipt-notification".equals(normalized) || "rn".equals(normalized)
+                || "1".equals(normalized)) {
+            return "RN";
+        }
+        if ("non-receipt-notification".equals(normalized) || "nrn".equals(normalized)
+                || "2".equals(normalized)) {
+            return "NRN";
+        }
+        return "None";
+    }
+
+    private void applyDefaults(Map<String, String> defaults) {
+        String recipient = firstNonEmptyValue(defaults, "primary-recipients", "recipient");
+        txtRecipient.setText(recipient != null ? recipient : "");
+        txtSubject.setText(valueOrDefault(defaults.get("subject"), ""));
+        txtContent.setText(valueOrDefault(defaults.get("content"), ""));
+
+        String atsPriority = firstNonEmptyValue(defaults,
+                "ats-priority", "priority-indicator", "subject-message-priority", "priority");
+        txtATSPriority.setText(atsPriority != null ? atsPriority : "");
+        comboPriority.setSelectedItem(toX400Priority(firstNonEmptyValue(defaults,
+                "priority", "ats-priority", "priority-indicator")));
+
+        String messageType = firstNonEmptyValue(defaults, "message-type");
+        if ("probe".equalsIgnoreCase(messageType) || defaults.containsKey("probe")) {
+            comboMsgType.setSelectedItem("Probe");
+        } else if ("rn".equalsIgnoreCase(messageType) || defaults.containsKey("rn")) {
+            comboMsgType.setSelectedItem("RN");
+        } else {
+            comboMsgType.setSelectedItem("IPM");
+        }
+
+        txtOHI.setText(valueOrDefault(defaults.get("optional-heading-info"), ""));
+        txtATSHeader.setText(valueOrDefault(defaults.get("ats-header"), ""));
+        comboDrReq.setSelectedItem(toDrSelection(defaults.get("originator-report-request")));
+        comboRnReq.setSelectedItem(toRnSelection(defaults.get("receipt-notification")));
+
+        String bodyPartType = firstNonEmptyValue(defaults, "body-part-types", "body-part-type");
+        comboBodyPartType.setSelectedItem(bodyPartType != null ? bodyPartType : "ia5-text");
+
+        String encoding = firstNonEmptyValue(defaults, "encoding");
+        if (encoding == null) {
+            encoding = bodyPartType != null && bodyPartType.toLowerCase().contains("general-text")
+                    ? "General Text" : "IA5";
+        }
+        comboEncoding.setSelectedItem(encoding);
+
+        String charset = firstNonEmptyValue(defaults, "charset-reg-number", "charset-reg-numbers");
+        comboCharset.setSelectedItem(charset != null ? charset : "6");
+        comboContentType.setSelectedItem(valueOrDefault(defaults.get("content-type"), "22"));
+        txtFTBPFileName.setText(valueOrDefault(defaults.get("ftbp-file-name"), "attachment.bin"));
+        txtFTBPContent.setText(valueOrDefault(defaults.get("ftbp-content"), ""));
     }
 
     // ── Utility helpers ───────────────────────────────────────────────────

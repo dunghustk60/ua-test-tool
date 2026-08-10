@@ -34,6 +34,7 @@ public class TestCaseSelectorPanel extends JPanel {
 
     // Listener maps
     private final Map<String, Runnable> defaultsLoadedListeners = new HashMap<>();
+    private final Map<String, Runnable> selectionChangedListeners = new HashMap<>();
     private final Map<String, Runnable> copyDefaultsListeners = new HashMap<>();
     private final Map<String, Runnable> sendDefaultsListeners = new HashMap<>();
     private final Map<String, Runnable> sendAllSubcasesListeners = new HashMap<>();
@@ -93,7 +94,7 @@ public class TestCaseSelectorPanel extends JPanel {
             displaySubcaseDescription(sn.subcase);
 
             if (!sn.subcase.getAmhsDefaults().isEmpty()) {
-                defaultsLoadedListeners.values().forEach(Runnable::run);
+                selectionChangedListeners.values().forEach(Runnable::run);
             }
         }
     }
@@ -242,6 +243,11 @@ public class TestCaseSelectorPanel extends JPanel {
     // Listener registration
     public void addDefaultsLoadedListener(String key, Runnable r) {
         defaultsLoadedListeners.put(key, r);
+    }
+
+    /** Invoked when a configured subcase is selected in the tree. */
+    public void addSelectionChangedListener(String key, Runnable r) {
+        selectionChangedListeners.put(key, r);
     }
 
     public void addCopyDefaultsListener(String key, Runnable r) {

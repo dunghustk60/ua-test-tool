@@ -315,7 +315,7 @@ public class AMHSMessageService {
                         filingTimeUsed
                 );
             }
-
+            System.out.println("x400msg toString: "+x400msg.toString());
             // Send the constructed message
             x400msg.sendMsg(bindSession);
 

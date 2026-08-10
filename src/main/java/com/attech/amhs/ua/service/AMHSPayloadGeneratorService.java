@@ -11,7 +11,8 @@ import com.isode.x400.highlevel.BodypartFTBP;
 import com.isode.x400api.AMHS_att;
 import com.isode.x400api.MSMessage;
 import com.isode.x400api.X400_att;
-import java.time.LocalDateTime;
+import java.time.ZoneOffset;
+import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.HashMap;
 import java.util.Map;
@@ -302,6 +303,18 @@ public class AMHSPayloadGeneratorService {
         try {
             int parsed = Integer.parseInt(value.trim());
             return parsed > 0 ? parsed : defaultValue;
+        } catch (NumberFormatException e) {
+            return defaultValue;
+        }
+    }
+
+    private int parseNonNegativeIntOrDefault(String value, int defaultValue) {
+        if (value == null || value.trim().isEmpty()) {
+            return defaultValue;
+        }
+        try {
+            int parsed = Integer.parseInt(value.trim());
+            return parsed >= 0 ? parsed : defaultValue;
         } catch (NumberFormatException e) {
             return defaultValue;
         }
@@ -625,7 +638,8 @@ public class AMHSPayloadGeneratorService {
                         || "nrn".equalsIgnoreCase(receiptMode.trim())) {
                     notifValue = 2; // 2 is typically NRN
                 } else {
-                    notifValue = Integer.parseInt(receiptMode.trim());
+                    // Dung fix 10 August 2026
+                    notifValue = 0;
                 }
                 message.setIntParam(X400_att.X400_N_NOTIFICATION_REQUEST, notifValue);
             } catch (Exception e) {
@@ -796,6 +810,7 @@ public class AMHSPayloadGeneratorService {
         dumpMessageAttributes(recipient, subject, content, priority, amhsDefaults);
 
         X400Msg message = new X400Msg(session);
+        // normalizing fields
         Map<String, String> normalizedDefaults = normalizeAmhsDefaults(amhsDefaults);
 
         try {
@@ -804,6 +819,7 @@ public class AMHSPayloadGeneratorService {
             if (toRecipients.isEmpty()) {
                 throw new RuntimeException("Recipient address is required and cannot be empty");
             }
+            // get delivery report
             X400Msg.DR_Request drRequest = getDrRequest(normalizedDefaults);
             int ipnRequest = getIpnRequest(normalizedDefaults);
             for (String to : toRecipients) {
@@ -821,7 +837,8 @@ public class AMHSPayloadGeneratorService {
             if ((effectivePriority == null || effectivePriority.trim().isEmpty()) && priority != null) {
                 effectivePriority = priority;
             }
-            X400_Priority priorityLevel = getPriorityFromString(effectivePriority);
+            X400_Priority priorityLevel = X400_Priority.NORMAL_PRIORITY; //getPriorityFromString(effectivePriority);
+
             message.setPriority(priorityLevel);
 
             // ── BODY PART(S) ──────────────────────────────────────────────────
@@ -839,19 +856,21 @@ public class AMHSPayloadGeneratorService {
             message.setStringparam(AMHS_att.ATS_S_FILING_TIME, ft);
             logger.debug("Set filing-time: {}", ft);
 
-            String atsPriority = firstNonEmpty(normalizedDefaults,
-                    "ats-priority", "priority-indicator", "subject-message-priority");
-            if (atsPriority == null || atsPriority.trim().isEmpty()) {
+            String atsPriority = normalizedDefaults.containsKey("ats-priority")
+                    ? normalizedDefaults.get("ats-priority")
+                    : firstNonEmpty(normalizedDefaults, "priority-indicator", "subject-message-priority");
+            if (atsPriority == null) {
                 atsPriority = effectivePriority;
             }
-            if (atsPriority != null && !atsPriority.trim().isEmpty()) {
+            if (atsPriority != null) {
                 message.setStringparam(AMHS_att.ATS_S_PRIORITY_INDICATOR, atsPriority.trim());
             }
 
             String extended = normalizedDefaults != null ? normalizedDefaults.get("extended") : null;
             message.setIntParam(AMHS_att.ATS_N_EXTENDED, "true".equalsIgnoreCase(extended) ? 1 : 0);
 
-            message.setIntParam(X400_att.X400_N_CONTENT_TYPE, 22); // AMHS Content Type
+            int contentType = parseNonNegativeIntOrDefault(normalizedDefaults.get("content-type"), 22);
+            message.setIntParam(X400_att.X400_N_CONTENT_TYPE, contentType);
             message.setStringparam(AMHS_att.ATS_S_TEXT, safeContent);
 
             if (normalizedDefaults != null) {
@@ -1311,10 +1330,10 @@ public class AMHSPayloadGeneratorService {
     }
 
     private String formatCurrentFilingTime() {
-        LocalDateTime now = LocalDateTime.now();
-        // set filing time to ddHHmm format
+        ZonedDateTime nowUtc = ZonedDateTime.now(ZoneOffset.UTC);
+        // ICAO ATS filing time uses UTC in ddHHmm format.
         DateTimeFormatter formatter = DateTimeFormatter.ofPattern("ddHHmm");
-        return now.format(formatter);
+        return nowUtc.format(formatter);
     }
 
     /**
@@ -1548,18 +1567,20 @@ public class AMHSPayloadGeneratorService {
             String ft = (filingTime != null && !filingTime.trim().isEmpty()) ? filingTime.trim() : resolveFilingTime(normalizedDefaults);
             msg.setStringparam(AMHS_att.ATS_S_FILING_TIME, ft);
 
-            String atsPriority = firstNonEmpty(normalizedDefaults,
-                    "ats-priority", "priority-indicator", "subject-message-priority");
-            if (atsPriority == null || atsPriority.trim().isEmpty()) {
+            String atsPriority = normalizedDefaults.containsKey("ats-priority")
+                    ? normalizedDefaults.get("ats-priority")
+                    : firstNonEmpty(normalizedDefaults, "priority-indicator", "subject-message-priority");
+            if (atsPriority == null) {
                 atsPriority = effectivePriority;
             }
-            if (atsPriority != null && !atsPriority.trim().isEmpty()) {
+            if (atsPriority != null) {
                 msg.setStringparam(AMHS_att.ATS_S_PRIORITY_INDICATOR, atsPriority.trim());
             }
 
             String extended = normalizedDefaults != null ? normalizedDefaults.get("extended") : null;
             msg.setIntParam(AMHS_att.ATS_N_EXTENDED, "true".equalsIgnoreCase(extended) ? 1 : 0);
-            msg.setIntParam(X400_att.X400_N_CONTENT_TYPE, 22);
+            int contentType = parseNonNegativeIntOrDefault(normalizedDefaults.get("content-type"), 22);
+            msg.setIntParam(X400_att.X400_N_CONTENT_TYPE, contentType);
             msg.setStringparam(AMHS_att.ATS_S_TEXT, safeContent);
 
             if (normalizedDefaults != null) {
