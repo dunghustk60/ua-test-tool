@@ -931,6 +931,11 @@ public class AMHSMessageUI extends JFrame {
         }
         appendOutput("Receiving messages…");
 
+        TestSubcase selectedSubcase = getSelectedSubcase();
+        final Map<String, String> receiveDefaults = selectedSubcase != null
+                ? new java.util.HashMap<>(selectedSubcase.getAmhsDefaults())
+                : java.util.Collections.emptyMap();
+
         new Thread(() -> {
             try {
                 List<AMHSMessageService.MessageSummary> all = messageService.getMailboxSummary();
@@ -938,12 +943,15 @@ public class AMHSMessageUI extends JFrame {
                     SwingUtilities.invokeLater(() -> appendOutput("No messages found."));
                     return;
                 }
-                List<AMHSMessageService.MessageSummary> msgs = messageService.receiveMessages(all.size());
+                List<AMHSMessageService.MessageSummary> msgs = messageService.receiveMessages(all.size(), receiveDefaults);
                 SwingUtilities.invokeLater(() -> {
                     appendOutput("Received " + msgs.size() + " message(s):");
                     for (AMHSMessageService.MessageSummary m : msgs) {
                         appendOutput("From: " + m.getSender() + "  Subject: " + m.getSubject()
                                 + (m.getReportType() != null ? "  [" + m.getReportType() + " Report]" : ""));
+                        if (m.getReportDetails() != null && m.getReportDetails().startsWith("RN staged")) {
+                            appendOutput(m.getReportDetails());
+                        }
                         addMessageToMarkingPanel(m.getSender(), txtUserOrAddress.getText().trim(), m.getSubject(),
                                 m.getContent(), null, true, null, true, null,
                                 m.getReportType(), m.getReportDetails());
@@ -1412,7 +1420,8 @@ public class AMHSMessageUI extends JFrame {
             String drRequest = defaults.get("originator-report-request");
             if (drRequest != null && !drRequest.trim().isEmpty()) {
                 String lower = drRequest.toLowerCase().trim();
-                if (lower.equals("report") || lower.equals("delivery-report") || lower.equals("3")) {
+                if (lower.equals("report") || lower.equals("delivery-report")
+                        || lower.equals("both") || lower.equals("3")) {
                     log.setDrRequestType("DR_DELIVERY_REPORT");
                 } else if (lower.equals("none") || lower.equals("0")) {
                     log.setDrRequestType("DR_NO_REPORT");
