@@ -6,7 +6,7 @@ import com.isode.x400.highlevel.X400APIException;
 import com.isode.x400.highlevel.X400Msg;
 import com.isode.x400.highlevel.X400Msg.X400_Priority;
 import com.isode.x400.highlevel.BodypartIA5Text;
-import com.attech.amhs.ua.isode.BodypartGeneralText;
+import com.isode.x400.highlevel.BodypartGeneralText;
 import com.isode.x400.highlevel.BodypartFTBP;
 import com.isode.x400api.AMHS_att;
 import com.isode.x400api.MSMessage;
@@ -673,15 +673,16 @@ public class AMHSPayloadGeneratorService {
         if (charsetSource != null && !charsetSource.trim().isEmpty()) {
             // Map testcase source values to ISO registration numbers
             if ("iso-isp-12062-2-A132-cyrillic-arabic-greek-hebrew".equals(charsetSource.trim())) {
-                charsetRegNum = "144, 127, 126, 138"; // Cyrillic (8859-5), Arabic (8859-6), Greek (8859-7), Hebrew (8859-8)
+                charsetRegNum = "1 6 144 127 126 138"; // ISO 646 plus Cyrillic, Arabic, Greek and Hebrew
             } else if ("iso-isp-12062-2-A132-cjk".equals(charsetSource.trim())) {
-                charsetRegNum = "58, 87, 149"; // Chinese, Japanese, Korean
+                charsetRegNum = "58 87 149"; // Chinese, Japanese, Korean
             }
         }
         String charsetRepertoire = amhsDefaults.get("charset-repertoire");
         if (charsetRegNum != null && !charsetRegNum.trim().isEmpty()) {
             try {
-                message.setStringparam(X400_att.X400_S_GENERAL_TEXT_CHARSETS, charsetRegNum.trim());
+                String isodeCharsets = charsetRegNum.replace(',', ' ').trim().replaceAll("\\s+", " ");
+                message.setStringparam(X400_att.X400_S_GENERAL_TEXT_CHARSETS, isodeCharsets);
             } catch (Exception e) {
                 logger.warn("Failed to set charset-reg-number: {}", e.getMessage());
             }
@@ -1384,50 +1385,27 @@ public class AMHSPayloadGeneratorService {
         String type = bodyPartType != null ? bodyPartType.trim().toLowerCase() : "ia5-text";
 
         if (type.contains("general-text")) {
-            try {
-                // The ISODE BodypartGeneralText constructor takes (charsetRegNumber, content)
-                // or (charsetRegNumber, content, conversionWithLossProhibited)
-                // charsetRepertoire is set via setStringParam on the bodypart object after
-                // construction
-                String charsetRegNum = amhsDefaults != null ? amhsDefaults.get("charset-reg-number") : null;
-                if (charsetRegNum == null || charsetRegNum.trim().isEmpty()) {
-                    charsetRegNum = amhsDefaults != null ? amhsDefaults.get("charset-reg-numbers") : null;
-                }
-                String charsetSource = amhsDefaults != null ? amhsDefaults.get("charset-source") : null;
-                if (charsetSource != null && !charsetSource.trim().isEmpty()) {
-                    // Map testcase source values to ISO registration numbers
-                    if ("iso-isp-12062-2-A132-cyrillic-arabic-greek-hebrew".equals(charsetSource.trim())) {
-                        charsetRegNum = "144, 127, 126, 138"; // Cyrillic (8859-5), Arabic (8859-6), Greek (8859-7), Hebrew (8859-8)
-                    } else if ("iso-isp-12062-2-A132-cjk".equals(charsetSource.trim())) {
-                        charsetRegNum = "58, 87, 149"; // Chinese, Japanese, Korean
-                    }
-                }
-                String charsetRepertoire = amhsDefaults != null ? amhsDefaults.get("charset-repertoire") : null;
-                String conversionWithLoss = amhsDefaults != null ? amhsDefaults.get("conversion-with-loss-prohibited") : null;
-
-                BodypartGeneralText generalText;
-                if (charsetRegNum != null && !charsetRegNum.trim().isEmpty()) {
-                    // Use constructor with charset registration number
-                    // Note: constructor signature is (content, charsetRegNumber, charsetRepertoire)
-                    if (conversionWithLoss != null && !conversionWithLoss.trim().isEmpty()) {
-                        // Pass conversion-with-loss as string, not boolean
-                        generalText = new BodypartGeneralText(safeContent, charsetRegNum.trim(), conversionWithLoss.trim());
-                    } else {
-                        generalText = new BodypartGeneralText(safeContent, charsetRegNum.trim(), null);
-                    }
-                    // Set charset repertoire if provided (using X.400 attribute 803)
-                    if (charsetRepertoire != null && !charsetRepertoire.trim().isEmpty()) {
-                        generalText.setStringParam(803, charsetRepertoire.trim());
-                    }
-                } else {
-                    // Fallback to simple constructor without charset
-                    generalText = new BodypartGeneralText(safeContent);
-                }
-                message.addBodypart(generalText);
-            } catch (Exception e) {
-                logger.warn("general-text body part failed, falling back to ia5-text: {}", e.getMessage());
-                message.addBodypart(new BodypartIA5Text(safeContent));
+            String charsetRegNum = amhsDefaults != null ? amhsDefaults.get("charset-reg-number") : null;
+            if (charsetRegNum == null || charsetRegNum.trim().isEmpty()) {
+                charsetRegNum = amhsDefaults != null ? amhsDefaults.get("charset-reg-numbers") : null;
             }
+            String charsetSource = amhsDefaults != null ? amhsDefaults.get("charset-source") : null;
+            if (charsetSource != null && !charsetSource.trim().isEmpty()) {
+                if ("iso-isp-12062-2-A132-cyrillic-arabic-greek-hebrew".equals(charsetSource.trim())) {
+                    charsetRegNum = "1 6 144 127 126 138";
+                } else if ("iso-isp-12062-2-A132-cjk".equals(charsetSource.trim())) {
+                    charsetRegNum = "58 87 149";
+                }
+            }
+            if (charsetRegNum == null || charsetRegNum.trim().isEmpty()) {
+                charsetRegNum = "1 6";
+            }
+
+            // Isode expects registration numbers separated by spaces. Its native
+            // constructor writes both charset (802) and body data (801) attributes.
+            String isodeCharsets = charsetRegNum.replace(',', ' ').trim().replaceAll("\\s+", " ");
+            BodypartGeneralText generalText = new BodypartGeneralText(isodeCharsets, safeContent);
+            message.addBodypart(generalText);
         } else if (type.equals("ia5-text")) {
             BodypartIA5Text ia5 = new BodypartIA5Text(safeContent);
             String repertoire = amhsDefaults != null ? amhsDefaults.get("repertoire") : null;
