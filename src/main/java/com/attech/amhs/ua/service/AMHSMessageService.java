@@ -291,8 +291,13 @@ public class AMHSMessageService {
             bindSession.bind();
 
             X400Msg x400msg;
-            // Determine if this is a probe message (CTSW011-015)
-            if (amhsDefaults != null && amhsDefaults.get("probe") != null && !amhsDefaults.get("probe").trim().isEmpty()) {
+            // Determine if this is a probe message (CTSW011-013). Testcase resources
+            // use message-type=probe; retain support for the legacy probe key.
+            String messageType = amhsDefaults != null ? amhsDefaults.get("message-type") : null;
+            String probe = amhsDefaults != null ? amhsDefaults.get("probe") : null;
+            boolean isProbe = "probe".equalsIgnoreCase(messageType != null ? messageType.trim() : "")
+                    || (probe != null && !probe.trim().isEmpty());
+            if (isProbe) {
                 // Build a probe message using the dedicated builder
                 x400msg = payloadGenerator.buildProbeMessage(
                         bindSession,
@@ -315,10 +320,8 @@ public class AMHSMessageService {
                         filingTimeUsed
                 );
             }
-            System.out.println("x400msg toString: "+x400msg.toString());
             // Send the constructed message
             x400msg.sendMsg(bindSession);
-
             String msgSubId = x400msg.getMessageIdentifier();
             System.out.println("AMHS Message submitted.");
             System.out.println("Message Submission ID: " + msgSubId);
@@ -335,6 +338,7 @@ public class AMHSMessageService {
                 try { bindSession.unbind(); } catch (X400APIException ex) {
                     logger.log(Level.FINE, "Error unbinding after failed send: " + ex.getMessage());
                 }
+                bindSession = null;
             }
 
             if (attempt < MAX_RETRIES) {

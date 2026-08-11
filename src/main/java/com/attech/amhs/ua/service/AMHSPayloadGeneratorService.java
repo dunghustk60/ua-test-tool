@@ -322,6 +322,24 @@ public class AMHSPayloadGeneratorService {
         }
     }
 
+    private int resolveProbeContentLength(Map<String, String> amhsDefaults, String fallbackContent) {
+        String configured = amhsDefaults != null ? amhsDefaults.get("content-length") : null;
+        if (configured == null || configured.trim().isEmpty()) {
+            return fallbackContent != null ? fallbackContent.getBytes(StandardCharsets.UTF_8).length : 0;
+        }
+        try {
+            long parsed = Long.parseLong(configured.trim());
+            if (parsed < 0 || parsed > Integer.MAX_VALUE) {
+                throw new IllegalArgumentException(
+                        "Probe content-length must be between 0 and " + Integer.MAX_VALUE + " octets: " + configured);
+            }
+            return (int) parsed;
+        } catch (NumberFormatException e) {
+            throw new IllegalArgumentException(
+                    "Probe content-length must be a numeric octet count: " + configured, e);
+        }
+    }
+
     private List<String> splitRecipients(String recipientString) {
         List<String> recipients = new ArrayList<>();
         if (recipientString == null || recipientString.trim().isEmpty()) {
@@ -332,6 +350,28 @@ public class AMHSPayloadGeneratorService {
             if (!trimmed.isEmpty()) {
                 recipients.add(trimmed);
             }
+        }
+        return recipients;
+    }
+
+    /**
+     * Generate deterministic test O/R addresses for recipient-limit test cases.
+     * CN contains exactly eight uppercase alphabetic characters. Addresses
+     * alternate between the VVTS and VVNB organizational units.
+     */
+    private List<String> generateUniqueTestRecipients(int count) {
+        List<String> recipients = new ArrayList<>(count);
+        for (int i = 0; i < count; i++) {
+            String ou = (i % 2 == 0) ? "VVTS" : "VVNB";
+            int suffixValue = i / 2;
+            char[] suffix = new char[4];
+            for (int position = suffix.length - 1; position >= 0; position--) {
+                suffix[position] = (char) ('A' + (suffixValue % 26));
+                suffixValue /= 26;
+            }
+            String cn = ou + new String(suffix);
+            recipients.add("/CN=" + cn + "/OU=" + ou
+                    + "/O=VVTS/PRMD=VIETNAM/ADMD=ICAO/C=XX/");
         }
         return recipients;
     }
@@ -347,6 +387,15 @@ public class AMHSPayloadGeneratorService {
                 recipients.size());
         if (count <= 0) {
             count = recipients.isEmpty() ? 1 : recipients.size();
+        }
+
+        boolean generateUniqueRecipients = amhsDefaults != null
+                && "true".equalsIgnoreCase(amhsDefaults.get("generate-unique-recipients"));
+        if (generateUniqueRecipients) {
+            List<String> generatedRecipients = generateUniqueTestRecipients(count);
+            logger.info("Generated unique test recipients: requested={}, generated={}",
+                    count, generatedRecipients.size());
+            return generatedRecipients;
         }
 
         if (recipients.isEmpty() && defaultRecipient != null && !defaultRecipient.trim().isEmpty()) {
@@ -1361,22 +1410,6 @@ public class AMHSPayloadGeneratorService {
     }
 
     /**
-     * Helper to set probe specific attributes
-     */
-    private void applyProbeFields(X400Msg message, Map<String, String> amhsDefaults) {
-        String probeId = amhsDefaults.get("probe");
-        if (probeId != null && !probeId.trim().isEmpty()) {
-            try {
-                message.setIntParam(AMHS_att.ATS_N_EXTENDED, -1);
-                message.setStringparam(X400_att.X400_S_SUBJECT_IDENTIFIER, probeId.trim());
-                logger.debug("applyProbeFields: probe id={}", probeId);
-            } catch (Exception e) {
-                logger.warn("Failed to set probe identifier: {}", e.getMessage());
-            }
-        }
-    }
-
-    /**
      * Helper method to add a body part to the message
      */
     private void addBodyPart(X400Msg message, String bodyPartType, String content, Map<String, String> amhsDefaults)
@@ -1511,7 +1544,7 @@ public class AMHSPayloadGeneratorService {
      * @param subject      Subject
      * @param content      Content
      * @param priority     Priority string
-     * @param amhsDefaults Map of defaults, must contain "probe" key
+     * @param amhsDefaults Map of defaults for the probe transfer envelope
      * @param filingTime   Filing time string (optional)
      * @return X400Msg configured as a probe
      */
@@ -1519,25 +1552,21 @@ public class AMHSPayloadGeneratorService {
             String content, String priority, Map<String, String> amhsDefaults,
             String filingTime) {
         
-        // Use true PROBE type instead of X400_MSG_MESSAGE
-        X400Msg msg = new X400Msg(session);
-        int code = com.isode.x400api.X400ms.x400_ms_msgnew(session, com.isode.x400api.X400_att.X400_MSG_PROBE, msg);
-        if (code != com.isode.x400api.X400_att.X400_E_NOERROR) {
-            logger.error("Failed to initialize message as PROBE. Code: " + code);
-        }
-
-        // Apply normal AMHS fields
+        // The boolean constructor creates the native object as X400_MSG_PROBE.
+        // A probe has a transfer envelope, but no IPM heading or body parts.
+        X400Msg msg = new X400Msg(session, true);
         Map<String, String> normalizedDefaults = normalizeAmhsDefaults(amhsDefaults);
         try {
             List<String> toRecipients = resolveToRecipients(normalizedDefaults, recipient);
-            X400Msg.DR_Request drRequest = getDrRequest(normalizedDefaults);
-            int ipnRequest = getIpnRequest(normalizedDefaults);
-            for (String to : toRecipients) {
-                msg.setTo(to, drRequest, ipnRequest);
+            if (toRecipients.isEmpty()) {
+                throw new IllegalArgumentException("A probe requires at least one envelope recipient");
             }
 
-            if (subject != null && !subject.trim().isEmpty()) {
-                msg.setSubject(subject.trim());
+            X400Msg.DR_Request drRequest = getDrRequest(normalizedDefaults);
+            for (String to : toRecipients) {
+                // recipientType=0 prevents creation of an IPM heading recipient.
+                // IPN requests apply to delivered messages, not probes.
+                msg.setRecipient(true, 0, to, drRequest, 0);
             }
 
             String effectivePriority = firstNonEmpty(normalizedDefaults,
@@ -1547,40 +1576,17 @@ public class AMHSPayloadGeneratorService {
             }
             msg.setPriority(getPriorityFromString(effectivePriority));
 
-            String safeContent = resolveBodyContent(normalizedDefaults, content);
-            String bodyPartTypeSpec = firstNonEmpty(normalizedDefaults, "body-part-types", "body-part-type");
-            addBodyParts(msg, bodyPartTypeSpec, safeContent, normalizedDefaults);
-
-            String ft = (filingTime != null && !filingTime.trim().isEmpty()) ? filingTime.trim() : resolveFilingTime(normalizedDefaults);
-            msg.setStringparam(AMHS_att.ATS_S_FILING_TIME, ft);
-
-            String atsPriority = normalizedDefaults.containsKey("ats-priority")
-                    ? normalizedDefaults.get("ats-priority")
-                    : firstNonEmpty(normalizedDefaults, "priority-indicator", "subject-message-priority");
-            if (atsPriority == null) {
-                atsPriority = effectivePriority;
-            }
-            if (atsPriority != null) {
-                msg.setStringparam(AMHS_att.ATS_S_PRIORITY_INDICATOR, atsPriority.trim());
-            }
-
-            String extended = normalizedDefaults != null ? normalizedDefaults.get("extended") : null;
-            msg.setIntParam(AMHS_att.ATS_N_EXTENDED, "true".equalsIgnoreCase(extended) ? 1 : 0);
             int contentType = parseNonNegativeIntOrDefault(normalizedDefaults.get("content-type"), 22);
+            int contentLength = resolveProbeContentLength(normalizedDefaults, content);
             msg.setIntParam(X400_att.X400_N_CONTENT_TYPE, contentType);
-            msg.setStringparam(AMHS_att.ATS_S_TEXT, safeContent);
-
-            if (normalizedDefaults != null) {
-                applyAmhsFieldsExceptBodyAndFilingTime(msg, normalizedDefaults);
-            }
+            msg.setIntParam(X400_att.X400_N_CONTENT_LENGTH, contentLength);
+            logger.info("Built X.400 probe: recipients={}, content-type={}, content-length={}, priority={}, DR={}",
+                    toRecipients.size(), contentType, contentLength,
+                    getPriorityFromString(effectivePriority), drRequest);
 
         } catch (X400APIException e) {
             logger.error("Error building Probe message: {}", e.getMessage(), e);
             throw new RuntimeException("Failed to build Probe message", e);
-        }
-
-        if (msg != null && amhsDefaults != null) {
-            applyProbeFields(msg, amhsDefaults);
         }
         return msg;
     }
