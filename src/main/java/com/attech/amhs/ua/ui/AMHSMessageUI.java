@@ -83,7 +83,9 @@ public class AMHSMessageUI extends JFrame {
     private JComboBox<String> comboMsgType;
     private JComboBox<String> comboDrReq;
     private JComboBox<String> comboRnReq;
+    private JComboBox<String> comboMtaReportReq;
     private JTextField txtATSHeader; // Custom ATS Header
+    private JTextField txtPayloadSize; // Generated payload size in bytes
     private JTextField txtFTBPFileName; // FTBP File Name
     private JTextArea txtFTBPContent; // FTBP Content
 
@@ -354,22 +356,37 @@ public class AMHSMessageUI extends JFrame {
         comboRnReq.setSelectedItem("None");
         panel.add(comboRnReq, gbc);
 
-        // OHI (Optional Heading Info)
+        // Originating MTA Report Request
         gbc.gridx = 2;
         gbc.gridy = 4;
         gbc.gridwidth = 1;
         gbc.weightx = 0;
-        panel.add(new JLabel("OHI:"), gbc);
+        panel.add(new JLabel("MTA Report Req:"), gbc);
         gbc.gridx = 3;
         gbc.gridwidth = 1;
         gbc.weightx = 0.5;
+        comboMtaReportReq = new JComboBox<>(new String[] {
+                "No Report", "Non-Delivery Report", "Report", "Audited Report"
+        });
+        comboMtaReportReq.setSelectedItem("No Report");
+        panel.add(comboMtaReportReq, gbc);
+
+        // OHI (Optional Heading Info)
+        gbc.gridx = 0;
+        gbc.gridy = 5;
+        gbc.gridwidth = 1;
+        gbc.weightx = 0;
+        panel.add(new JLabel("OHI:"), gbc);
+        gbc.gridx = 1;
+        gbc.gridwidth = 3;
+        gbc.weightx = 1.0;
         txtOHI = new JTextField("", 30);
         txtOHI.setToolTipText("Optional Heading Info");
         panel.add(txtOHI, gbc);
 
         // Content
         gbc.gridx = 0;
-        gbc.gridy = 5;
+        gbc.gridy = 6;
         gbc.gridwidth = 1;
         gbc.weightx = 0;
         gbc.anchor = GridBagConstraints.NORTHWEST;
@@ -395,7 +412,7 @@ public class AMHSMessageUI extends JFrame {
 
         // Encoding (AMHS-specific)
         gbc.gridx = 0;
-        gbc.gridy = 6;
+        gbc.gridy = 7;
         gbc.gridwidth = 1;
         gbc.weightx = 0;
         panel.add(new JLabel("Encoding:"), gbc);
@@ -426,7 +443,7 @@ public class AMHSMessageUI extends JFrame {
 
         // Content Type (AMHS-specific)
         gbc.gridx = 0;
-        gbc.gridy = 7;
+        gbc.gridy = 8;
         gbc.gridwidth = 1;
         gbc.weightx = 0;
         panel.add(new JLabel("Content Type:"), gbc);
@@ -455,7 +472,7 @@ public class AMHSMessageUI extends JFrame {
 
         // Body Part Type (AMHS-specific - FTBP support)
         gbc.gridx = 0;
-        gbc.gridy = 8;
+        gbc.gridy = 9;
         gbc.gridwidth = 1;
         gbc.weightx = 0;
         panel.add(new JLabel("Body Part Type:"), gbc);
@@ -482,9 +499,24 @@ public class AMHSMessageUI extends JFrame {
         txtFTBPFileName.setToolTipText("File name for file-transfer-body-part");
         panel.add(txtFTBPFileName, gbc);
 
+        // Generated payload size
+        gbc.gridx = 0;
+        gbc.gridy = 10;
+        gbc.gridwidth = 1;
+        gbc.weightx = 0;
+        gbc.weighty = 0;
+        gbc.fill = GridBagConstraints.HORIZONTAL;
+        gbc.anchor = GridBagConstraints.CENTER;
+        panel.add(new JLabel("Payload Size (bytes):"), gbc);
+        gbc.gridx = 1;
+        gbc.weightx = 0.5;
+        txtPayloadSize = new JTextField("", 8);
+        txtPayloadSize.setToolTipText("Positive payload size in bytes; blank keeps the content unchanged");
+        panel.add(txtPayloadSize, gbc);
+
         // FTBP Content (multi-line for file content)
         gbc.gridx = 0;
-        gbc.gridy = 9;
+        gbc.gridy = 11;
         gbc.gridwidth = 1;
         gbc.weightx = 0;
         gbc.anchor = GridBagConstraints.NORTHWEST;
@@ -500,7 +532,7 @@ public class AMHSMessageUI extends JFrame {
         panel.add(new JScrollPane(txtFTBPContent), gbc);
 
         // Buttons
-        gbc.gridy = 10;
+        gbc.gridy = 12;
         gbc.gridwidth = 1;
         gbc.weightx = 0;
         gbc.weighty = 0;
@@ -827,6 +859,19 @@ public class AMHSMessageUI extends JFrame {
         }
 
         // ── Snapshot subcase and its defaults HERE on the EDT ─────────────────
+        String payloadSize = txtPayloadSize.getText().trim();
+        if (!payloadSize.isEmpty()) {
+            try {
+                if (Integer.parseInt(payloadSize) <= 0) {
+                    appendOutput("Error: Payload Size must be a positive integer.");
+                    return;
+                }
+            } catch (NumberFormatException e) {
+                appendOutput("Error: Payload Size must be a positive integer.");
+                return;
+            }
+        }
+
         TestSubcase currentSubcase = getSelectedSubcase();
         Map<String, String> defaults = currentSubcase != null
                 ? new java.util.HashMap<>(currentSubcase.getAmhsDefaults())
@@ -953,11 +998,13 @@ public class AMHSMessageUI extends JFrame {
         comboMsgType.setSelectedItem("IPM");
         comboDrReq.setSelectedItem("NDR");
         comboRnReq.setSelectedItem("None");
+        comboMtaReportReq.setSelectedItem("No Report");
         comboEncoding.setSelectedItem("IA5");
         comboCharset.setSelectedItem("6");
         comboContentType.setSelectedItem("22");
         txtATSHeader.setText("");
         comboBodyPartType.setSelectedItem("ia5-text");
+        txtPayloadSize.setText("");
         txtFTBPFileName.setText("attachment.bin");
         txtFTBPContent.setText("");
     }
@@ -1129,9 +1176,12 @@ public class AMHSMessageUI extends JFrame {
         fields.put("charset-reg-number", valueOrDefault((String) comboCharset.getSelectedItem(), ""));
         fields.put("content-type", valueOrDefault((String) comboContentType.getSelectedItem(), ""));
         fields.put("body-part-type", valueOrDefault((String) comboBodyPartType.getSelectedItem(), "ia5-text"));
+        fields.put("payload-size", txtPayloadSize.getText().trim());
         fields.put("ftbp-file-name", txtFTBPFileName.getText().trim());
         fields.put("ftbp-content", txtFTBPContent.getText());
         fields.put("originator-report-request", valueOrDefault((String) comboDrReq.getSelectedItem(), "None"));
+        fields.put("originating-mta-report-request",
+                toMtaReportValue((String) comboMtaReportReq.getSelectedItem()));
         fields.put("receipt-notification", valueOrDefault((String) comboRnReq.getSelectedItem(), "None"));
 
         String messageType = valueOrDefault((String) comboMsgType.getSelectedItem(), "IPM").toLowerCase();
@@ -1215,6 +1265,41 @@ public class AMHSMessageUI extends JFrame {
         return "None";
     }
 
+    private String toMtaReportValue(String selection) {
+        if (selection == null) {
+            return "no-report";
+        }
+        String normalized = selection.trim().toLowerCase();
+        if ("non-delivery report".equals(normalized) || "non-delivery-report".equals(normalized)
+                || "ndr".equals(normalized) || "1".equals(normalized)) {
+            return "non-delivery-report";
+        }
+        if ("audited report".equals(normalized) || "audited-report".equals(normalized)
+                || "3".equals(normalized)) {
+            return "audited-report";
+        }
+        if ("report".equals(normalized) || "delivery report".equals(normalized)
+                || "delivery-report".equals(normalized) || "dr".equals(normalized)
+                || "2".equals(normalized)) {
+            return "report";
+        }
+        return "no-report";
+    }
+
+    private String toMtaSelection(String value) {
+        String canonical = toMtaReportValue(value);
+        if ("non-delivery-report".equals(canonical)) {
+            return "Non-Delivery Report";
+        }
+        if ("audited-report".equals(canonical)) {
+            return "Audited Report";
+        }
+        if ("report".equals(canonical)) {
+            return "Report";
+        }
+        return "No Report";
+    }
+
     private void applyDefaults(Map<String, String> defaults) {
         String recipient = firstNonEmptyValue(defaults, "primary-recipients", "recipient");
         txtRecipient.setText(recipient != null ? recipient : "");
@@ -1240,6 +1325,7 @@ public class AMHSMessageUI extends JFrame {
         txtATSHeader.setText(valueOrDefault(defaults.get("ats-header"), ""));
         comboDrReq.setSelectedItem(toDrSelection(defaults.get("originator-report-request")));
         comboRnReq.setSelectedItem(toRnSelection(defaults.get("receipt-notification")));
+        comboMtaReportReq.setSelectedItem(toMtaSelection(defaults.get("originating-mta-report-request")));
 
         String bodyPartType = firstNonEmptyValue(defaults, "body-part-types", "body-part-type");
         comboBodyPartType.setSelectedItem(bodyPartType != null ? bodyPartType : "ia5-text");
@@ -1254,6 +1340,7 @@ public class AMHSMessageUI extends JFrame {
         String charset = firstNonEmptyValue(defaults, "charset-reg-number", "charset-reg-numbers");
         comboCharset.setSelectedItem(charset != null ? charset : "6");
         comboContentType.setSelectedItem(valueOrDefault(defaults.get("content-type"), "22"));
+        txtPayloadSize.setText(valueOrDefault(defaults.get("payload-size"), ""));
         txtFTBPFileName.setText(valueOrDefault(defaults.get("ftbp-file-name"), "attachment.bin"));
         txtFTBPContent.setText(valueOrDefault(defaults.get("ftbp-content"), ""));
     }

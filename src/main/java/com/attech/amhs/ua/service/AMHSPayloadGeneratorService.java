@@ -11,6 +11,7 @@ import com.isode.x400.highlevel.BodypartFTBP;
 import com.isode.x400api.AMHS_att;
 import com.isode.x400api.MSMessage;
 import com.isode.x400api.X400_att;
+import java.nio.charset.StandardCharsets;
 import java.time.ZoneOffset;
 import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
@@ -48,6 +49,7 @@ public class AMHSPayloadGeneratorService {
 
         // Body part configuration
         EMPTY_DEFAULTS.put("body-part-type", "ia5-text"); // Default to ia5-text
+        EMPTY_DEFAULTS.put("payload-size", "");
         EMPTY_DEFAULTS.put("charset-reg-number", "");
         EMPTY_DEFAULTS.put("charset-repertoire", "");
         EMPTY_DEFAULTS.put("conversion-with-loss-prohibited", "");
@@ -391,11 +393,17 @@ public class AMHSPayloadGeneratorService {
         }
 
         String payloadSize = amhsDefaults != null ? amhsDefaults.get("payload-size") : null;
-        if (payloadSize != null) {
-            if ("exceed-limit".equalsIgnoreCase(payloadSize.trim())) {
+        if (payloadSize != null && !payloadSize.trim().isEmpty()) {
+            String configuredSize = payloadSize.trim();
+            int numericSize = parseIntOrDefault(configuredSize, -1);
+            if (numericSize > 0) {
+                return padContent(baseContent, numericSize);
+            }
+            // Backward compatibility for existing testcase configurations.
+            if ("exceed-limit".equalsIgnoreCase(configuredSize)) {
                 return padContent(baseContent, 4096);
             }
-            if ("within-limit".equalsIgnoreCase(payloadSize.trim())) {
+            if ("within-limit".equalsIgnoreCase(configuredSize)) {
                 return padContent(baseContent, 1024);
             }
         }
@@ -1445,11 +1453,12 @@ public class AMHSPayloadGeneratorService {
                 fileName = "attachment.bin";
             }
 
-            // Convert content string to bytes if provided
-            byte[] contentBytes = new byte[0];
-            if (ftbpContent != null && !ftbpContent.trim().isEmpty()) {
-                contentBytes = ftbpContent.trim().getBytes();
-            }
+            // Prefer explicitly configured FTBP content. Otherwise use the resolved
+            // body content so payload-size/content-length also apply to binary FTBPs.
+            String binaryContent = ftbpContent != null && !ftbpContent.isEmpty()
+                    ? ftbpContent
+                    : safeContent;
+            byte[] contentBytes = binaryContent.getBytes(StandardCharsets.UTF_8);
 
             BodypartFTBP ftbp = new BodypartFTBP(fileName.trim(), contentBytes);
             message.addBodypart(ftbp);
