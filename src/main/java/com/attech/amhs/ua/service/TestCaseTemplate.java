@@ -501,7 +501,7 @@ public class TestCaseTemplate {
 
     private static TestCase createCTSW016() {
         // CTSW016: Processing of the current encoded-information-types (EIT)
-        // Loads all 12 subcases from CTSW016.properties via TestCaseConfigLoader
+        // Loads 12 IPMs and 12 matching Probes from CTSW016.properties.
         List<TestCase> loaded = com.attech.amhs.ua.service.TestCaseConfigLoader.loadAllTestCases();
         for (TestCase tc : loaded) {
             if ("CTSW016".equals(tc.getId())) {

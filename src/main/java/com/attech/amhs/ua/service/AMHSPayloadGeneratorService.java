@@ -194,6 +194,42 @@ public class AMHSPayloadGeneratorService {
         return result;
     }
 
+    /** Apply CTSW016 current/original EIT values to an IPM or Probe envelope. */
+    private void applyEncodedInformationTypes(X400Msg message, Map<String, String> amhsDefaults)
+            throws X400APIException {
+        if (amhsDefaults == null) {
+            return;
+        }
+
+        String eitBuiltin = firstNonEmpty(amhsDefaults,
+                "eit-builtin-value", "eit-value", "eit-builtin");
+        String rawEitOid = firstNonEmpty(amhsDefaults, "eit-oid", "eit-oids");
+        List<String> eitOidList = resolveEitOidList(rawEitOid);
+        String eitAuth = firstNonEmpty(amhsDefaults, "eit-authority");
+        if (eitBuiltin == null && eitOidList.isEmpty() && eitAuth == null) {
+            return;
+        }
+
+        List<String> eitTokens = new ArrayList<>();
+        if (eitBuiltin != null) {
+            String encodedBuiltin = BUILTIN_EIT_MAP.get(eitBuiltin);
+            if (encodedBuiltin == null) {
+                encodedBuiltin = eitBuiltin;
+            }
+            eitTokens.add(encodedBuiltin);
+            logger.info("[CTSW016] EIT built-in: configured={}, encoded={}",
+                    eitBuiltin, encodedBuiltin);
+        }
+        eitTokens.addAll(eitOidList);
+        if (eitAuth != null) {
+            eitTokens.add(eitAuth);
+        }
+
+        String finalEit = String.join(" ", eitTokens);
+        message.setStringparam(X400_att.X400_S_ORIGINAL_ENCODED_INFORMATION_TYPES, finalEit);
+        logger.info("[CTSW016] Set X400_S_ORIGINAL_ENCODED_INFORMATION_TYPES='{}'", finalEit);
+    }
+
     /**
      * Get default AMHS fields for a test subcase
      * If subcase has defaults, use them; otherwise use empty defaults
@@ -744,68 +780,7 @@ public class AMHSPayloadGeneratorService {
             }
         }
 
-        // === EIT CONFIGURATION (CTSW016) ===
-        System.out.println("=== EIT CONFIGURATION START ===");
-        System.out.println("amhsDefaults: " + amhsDefaults);
-        // Key aliases: "eit-builtin-value" (properties file) or "eit-value" or "eit-builtin"
-        String eitBuiltin = amhsDefaults.get("eit-builtin-value");
-        System.out.println("eitBuiltin after eit-builtin-value: " + eitBuiltin);
-        if (eitBuiltin == null)
-            eitBuiltin = amhsDefaults.get("eit-value");
-        System.out.println("eitBuiltin after eit-value: " + eitBuiltin);
-        if (eitBuiltin == null)
-            eitBuiltin = amhsDefaults.get("eit-builtin");
-        System.out.println("eitBuiltin after eit-builtin: " + eitBuiltin);
-        // Resolve OID list: supports symbolic names (id-cs-eit-authority-N) and dotted-decimal
-        String rawEitOid = amhsDefaults.get("eit-oid");
-        System.out.println("rawEitOid: " + rawEitOid);
-        List<String> eitOidList = resolveEitOidList(rawEitOid);
-        System.out.println("eitOidList: " + eitOidList);
-        String eitAuth = amhsDefaults.get("eit-authority");
-        System.out.println("eitAuth: " + eitAuth);
-        if ((eitBuiltin != null && !eitBuiltin.trim().isEmpty()) || !eitOidList.isEmpty() || (eitAuth != null && !eitAuth.trim().isEmpty())) {
-            try {
-                List<String> eitTokens = new ArrayList<>();
-                // Add built-in EIT (use canonical textual form when known)
-                if (eitBuiltin != null && !eitBuiltin.trim().isEmpty()) {
-                    String builtinValue = BUILTIN_EIT_MAP.get(eitBuiltin.trim());
-                    System.out.println("builtinValue: " + builtinValue);
-                    if (builtinValue != null) {
-                        eitTokens.add(builtinValue);
-                        logger.info("[CTSW016] EIT built-in: configured={}, encoded={}",
-                                eitBuiltin.trim(), builtinValue);
-                    } else {
-                        // Leave unknown numeric built-ins as-is so gateway can reject them
-                        eitTokens.add(eitBuiltin.trim());
-                        logger.info("[CTSW016] EIT built-in: configured={}, encoded={}",
-                                eitBuiltin.trim(), eitBuiltin.trim());
-                    }
-                }
-                // Add extended EIT OIDs
-                for (String oid : eitOidList) {
-                    eitTokens.add(oid);
-                }
-                // Add authority (if needed)
-                if (eitAuth != null && !eitAuth.trim().isEmpty()) {
-                    eitTokens.add(eitAuth.trim());
-                }
-                // Use space-separated tokens to match legacy UA formatting ("ia5-text 2.6.3.4.2 ...")
-                String finalEit = String.join(" ", eitTokens);
-                System.out.println("Final EIT string to set: '" + finalEit + "'");
-                if (!finalEit.isEmpty()) {
-                    // X400_S_ORIGINAL_ENCODED_INFORMATION_TYPES sets the EIT on the outgoing MTE
-                    message.setStringparam(X400_att.X400_S_ORIGINAL_ENCODED_INFORMATION_TYPES, finalEit);
-                    logger.debug("[CTSW016] Set MTE EIT via X400_S_ORIGINAL_ENCODED_INFORMATION_TYPES: {}", finalEit);
-                    System.out.println("=== Successfully set EIT ===");
-                }
-            } catch (Exception e) {
-                logger.warn("Failed to set EIT: {}", e.getMessage(), e);
-                System.out.println("=== Failed to set EIT: " + e.getMessage() + " ===");
-                e.printStackTrace();
-            }
-        } else {
-            System.out.println("=== No EIT configuration found ===");
-        }
+        applyEncodedInformationTypes(message, amhsDefaults);
 
         // === REPORT/NOTIFICATION CONFIGURATION ===
         String originatorReport = amhsDefaults.get("originator-report-request");
@@ -1239,52 +1214,7 @@ public class AMHSPayloadGeneratorService {
                     conversionProhibited);
         }
 
-        // === EIT CONFIGURATION (CTSW016) ===
-        // Key aliases: "eit-builtin-value" (properties file) or "eit-value" or "eit-builtin"
-        String eitBuiltin = amhsDefaults.get("eit-builtin-value");
-        if (eitBuiltin == null)
-            eitBuiltin = amhsDefaults.get("eit-value");
-        if (eitBuiltin == null)
-            eitBuiltin = amhsDefaults.get("eit-builtin");
-        // Resolve OID list: support both 'eit-oid' and 'eit-oids' keys
-        String rawEitOid = firstNonEmpty(amhsDefaults, "eit-oid", "eit-oids");
-        List<String> eitOidList = resolveEitOidList(rawEitOid);
-        String eitAuth = amhsDefaults.get("eit-authority");
-        if ((eitBuiltin != null && !eitBuiltin.trim().isEmpty()) || !eitOidList.isEmpty() || (eitAuth != null && !eitAuth.trim().isEmpty())) {
-            logger.info(
-                    "[CTSW016] EIT config: builtin={}, resolved-oids={}, authority={}",
-                    eitBuiltin, eitOidList, eitAuth);
-            try {
-                List<String> eitTokens = new ArrayList<>();
-                if (eitBuiltin != null && !eitBuiltin.trim().isEmpty()) {
-                    String builtinValue = BUILTIN_EIT_MAP.get(eitBuiltin.trim());
-                    if (builtinValue != null) {
-                        eitTokens.add(builtinValue);
-                        logger.info("[CTSW016] EIT built-in: configured={}, encoded={}",
-                                eitBuiltin.trim(), builtinValue);
-                    } else {
-                        eitTokens.add(eitBuiltin.trim());
-                        logger.info("[CTSW016] EIT built-in: configured={}, encoded={}",
-                                eitBuiltin.trim(), eitBuiltin.trim());
-                    }
-                }
-                for (String oid : eitOidList) {
-                    eitTokens.add(oid);
-                }
-                if (eitAuth != null && !eitAuth.trim().isEmpty()) {
-                    eitTokens.add(eitAuth.trim());
-                }
-                // Use space-separated tokens to match legacy UA formatting ("ia5-text 2.6.3.4.2 ...")
-                String finalEit = String.join(" ", eitTokens);
-                if (!finalEit.isEmpty()) {
-                    // X400_S_ORIGINAL_ENCODED_INFORMATION_TYPES sets the EIT on the outgoing MTE
-                    message.setStringparam(X400_att.X400_S_ORIGINAL_ENCODED_INFORMATION_TYPES, finalEit);
-                    logger.debug("[CTSW016] Set MTE EIT via X400_S_ORIGINAL_ENCODED_INFORMATION_TYPES: {}", finalEit);
-                }
-            } catch (Exception e) {
-                logger.warn("Failed to set EIT: {}", e.getMessage(), e);
-            }
-        }
+        applyEncodedInformationTypes(message, amhsDefaults);
 
         // === REPORT/NOTIFICATION CONFIGURATION ===
 
@@ -1589,6 +1519,7 @@ public class AMHSPayloadGeneratorService {
             int contentLength = resolveProbeContentLength(normalizedDefaults, content);
             msg.setIntParam(X400_att.X400_N_CONTENT_TYPE, contentType);
             msg.setIntParam(X400_att.X400_N_CONTENT_LENGTH, contentLength);
+            applyEncodedInformationTypes(msg, normalizedDefaults);
             logger.info("Built X.400 probe: recipients={}, content-type={}, content-length={}, priority={}, DR={}",
                     toRecipients.size(), contentType, contentLength,
                     getPriorityFromString(effectivePriority), drRequest);

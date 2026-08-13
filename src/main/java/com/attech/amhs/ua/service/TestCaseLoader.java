@@ -130,7 +130,19 @@ public class TestCaseLoader {
             {"EIT: Invalid OID {3}", "Extended-encoded-information-types: OID {id-cs-eit-authority 3}", "Message processed with invalid OID handling"},
             {"EIT: OIDs {1, 6} + Invalid {7}", "Extended-encoded-information-types: OID {1, 6} and invalid OID {7}", "Message processed with mixed valid and invalid OIDs"},
             {"EIT: Built-in(2) + Extended {2.6.3.4.2, 1, 6}", "Mixed built-in ia5-text(2) and extended OIDs", "Message processed with combined built-in and extended EITs"},
-            {"EIT: OID {id-eit-file-transfer 0}", "Extended-encoded-information-types: OID {id-eit-file-transfer 0}", "Message processed with file-transfer EIT OID"}
+            {"EIT: OID {id-eit-file-transfer 0}", "Extended-encoded-information-types: OID {id-eit-file-transfer 0}", "Message processed with file-transfer EIT OID"},
+            {"Probe EIT: ia5-text(2)", "Probe with built-in-encoded-information-types: ia5-text(2)", "Probe accepted and delivery report generated"},
+            {"Probe EIT: unknown(0)", "Probe with built-in-encoded-information-types: unknown(0)", "Probe rejected with encoded-information-types-unsupported NDR"},
+            {"Probe EIT: OID 2.6.3.4.2", "Probe with extended EIT OID 2.6.3.4.2", "Probe accepted and delivery report generated"},
+            {"Probe EIT: OID 2.6.3.4.0", "Probe with invalid extended EIT OID 2.6.3.4.0", "Probe rejected with encoded-information-types-unsupported NDR"},
+            {"Probe EIT: OID authority 1", "Probe with extended EIT OID {id-cs-eit-authority 1}", "Probe accepted and delivery report generated"},
+            {"Probe EIT: OID authority 2", "Probe with extended EIT OID {id-cs-eit-authority 2}", "Probe accepted and delivery report generated"},
+            {"Probe EIT: OIDs {1, 6}", "Probe with extended EIT OIDs {1, 6}", "Probe accepted and delivery report generated"},
+            {"Probe EIT: OIDs {1, 6, 100}", "Probe with extended EIT OIDs {1, 6, 100}", "Probe accepted and delivery report generated"},
+            {"Probe EIT: Invalid OID {3}", "Probe with invalid extended EIT OID {3}", "Probe rejected with encoded-information-types-unsupported NDR"},
+            {"Probe EIT: OIDs {1, 6} + Invalid {7}", "Probe with valid OIDs {1, 6} and invalid OID {7}", "Probe rejected with encoded-information-types-unsupported NDR"},
+            {"Probe EIT: Built-in(2) + Extended", "Probe with built-in ia5-text(2) and extended EIT OIDs", "Probe accepted and delivery report generated"},
+            {"Probe EIT: OID {id-eit-file-transfer 0}", "Probe with extended EIT OID {id-eit-file-transfer 0}", "Probe accepted and delivery report generated"}
         });
 
         addCase(testCases, "CTSW017", "Incoming IPM with an ia5-text-body-part", "IA5-text body part validation", new String[][]{
