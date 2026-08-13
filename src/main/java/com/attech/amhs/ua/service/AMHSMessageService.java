@@ -400,7 +400,10 @@ public class AMHSMessageService {
 
         } catch (X400APIException e) {
             lastException = e;
-            logger.log(Level.WARNING, "AMHS send attempt " + attempt + " failed: " + e.getMessage(), e);
+            int nativeCode = e.getNativeErrorCode();
+            logger.log(Level.WARNING, "AMHS send attempt " + attempt + " failed: " + e.getMessage()
+                    + " [nativeCode=" + nativeCode + ", "
+                    + X400APIException.nativeErrorToString(nativeCode) + "]", e);
 
             if (bindSession != null) {
                 try { bindSession.unbind(); } catch (X400APIException ex) {
