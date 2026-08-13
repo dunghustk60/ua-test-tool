@@ -9,6 +9,9 @@ import com.isode.x400api.X400_att;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.text.SimpleDateFormat;
+import java.util.Date;
+import java.util.TimeZone;
 import java.util.logging.Logger;
 import java.util.logging.Level;
 
@@ -26,9 +29,54 @@ public class AMHSMessageService {
     private P3BindSession session;
     private AMHSPayloadGeneratorService payloadGenerator = new AMHSPayloadGeneratorService();
     private String lastSentFilingTime;
-    private X400Msg pendingReceiptNotification;
+    private final List<PendingReceiptNotification> pendingReceiptNotifications = new ArrayList<>();
     private P7BindSession pendingReceiptNotificationSession;
-    private String pendingReceiptNotificationPriority;
+
+    private static final class PendingReceiptNotification {
+        private final X400Msg message;
+        private final String subjectMessageId;
+        private final String subject;
+        private final String subjectPriority;
+        private final String receiptNotificationRecipient;
+
+        private PendingReceiptNotification(X400Msg message, String subjectMessageId,
+                String subject, String subjectPriority, String receiptNotificationRecipient) {
+            this.message = message;
+            this.subjectMessageId = subjectMessageId;
+            this.subject = subject;
+            this.subjectPriority = subjectPriority;
+            this.receiptNotificationRecipient = receiptNotificationRecipient;
+        }
+    }
+
+    /** Immutable GUI view of a staged CTSW014 subject message. */
+    public static final class ReceiptNotificationSubject {
+        private final String messageId;
+        private final String priority;
+        private final String subject;
+        private final String recipient;
+
+        private ReceiptNotificationSubject(String messageId, String priority,
+                String subject, String recipient) {
+            this.messageId = messageId;
+            this.priority = priority;
+            this.subject = subject;
+            this.recipient = recipient;
+        }
+
+        public String getMessageId() { return messageId; }
+        public String getPriority() { return priority; }
+        public String getSubject() { return subject; }
+        public String getRecipient() { return recipient; }
+
+        @Override
+        public String toString() {
+            String compactId = messageId != null && messageId.length() > 42
+                    ? messageId.substring(0, 39) + "..." : messageId;
+            return priority + " | " + compactId + " | "
+                    + (subject != null ? subject : "");
+        }
+    }
     
     // Configuration
     private String presentationAddress;
@@ -233,7 +281,7 @@ public class AMHSMessageService {
      * Disconnect from the X.400 system
      */
     public void disconnect() {
-        discardPendingReceiptNotification();
+        discardPendingReceiptNotifications();
         isConnected = false;
         if (session != null) {
             try {
@@ -277,6 +325,17 @@ public class AMHSMessageService {
     if (isCtsw014ReceiptNotification(amhsDefaults)) {
         lastSentFilingTime = null;
         return sendPendingReceiptNotification(amhsDefaults);
+    }
+
+    if (isStandaloneFictitiousReceiptNotification(amhsDefaults)) {
+        lastSentFilingTime = null;
+        return sendStandaloneReceiptNotification(recipient, amhsDefaults);
+    }
+
+    if (amhsDefaults != null
+            && "rn".equalsIgnoreCase(trimToNull(amhsDefaults.get("message-type")))) {
+        throw new X400APIException("RN submission requires either a staged CTSW014 subject IPM "
+                + "or a configured CTSW015 subject-ipm-id.");
     }
 
     String filingTimeUsed = payloadGenerator.resolveFilingTime(amhsDefaults);
@@ -405,10 +464,12 @@ public class AMHSMessageService {
             throws X400APIException {
         List<MessageSummary> messages = new ArrayList<>();
         boolean prepareReceiptNotification = isCtsw014ReceiptNotification(selectedDefaults);
-        String requiredSubjectPriority = prepareReceiptNotification
-                ? trimToNull(selectedDefaults.get("subject-message-priority")) : null;
         P7BindSession bindSession = null;
         boolean retainBindSession = false;
+
+        if (prepareReceiptNotification) {
+            discardPendingReceiptNotifications();
+        }
         
         try {
             bindSession = new P7BindSession(normalizePresentationAddress(presentationAddress), userOrAddress, password);
@@ -476,6 +537,11 @@ public class AMHSMessageService {
                                 }
                             }
                         }
+                        String ctsw015Validation = validateCtsw015Ndr(receivedMsg, selectedDefaults);
+                        if (ctsw015Validation != null) {
+                            if (details.length() > 0) details.append("; ");
+                            details.append(ctsw015Validation);
+                        }
                         summary.setReportDetails(details.toString());
                     } else if (receivedMsg.getType() == com.attech.amhs.ua.isode.enums.MessageType.IPN) {
                         summary.setReportType("IPN");
@@ -486,26 +552,46 @@ public class AMHSMessageService {
                     } else if (receivedMsg.getType() == com.attech.amhs.ua.isode.enums.MessageType.IPM) {
                         Integer ipnReq = receivedMsg.getIpnRequest();
                         if (ipnReq != null && (ipnReq == 1 || ipnReq == 3)) { // 1=RN, 3=both
-                            String actualSubjectPriority = trimToNull(receivedMsg.getAtsPriority());
-                            boolean priorityMatches = requiredSubjectPriority == null
-                                    || requiredSubjectPriority.equalsIgnoreCase(actualSubjectPriority);
-
-                            if (prepareReceiptNotification && priorityMatches) {
+                            String actualSubjectPriority = null;
+                            try {
+                                actualSubjectPriority = trimToNull(
+                                        rm.getStringParam(com.isode.x400api.AMHS_att.ATS_S_PRIORITY_INDICATOR));
+                            } catch (Exception ex) {
+                                logger.log(Level.FINE, "ATS priority is not directly available: " + ex.getMessage());
+                            }
+                            if (actualSubjectPriority == null) {
+                                actualSubjectPriority = trimToNull(receivedMsg.getAtsPriority());
+                            }
+                            if (prepareReceiptNotification) {
+                                String subjectMessageId = trimToNull(
+                                        rm.getStringParam(X400_att.X400_S_IPM_IDENTIFIER));
+                                if (subjectMessageId == null) {
+                                    subjectMessageId = trimToNull(rm.getMessageIdentifier());
+                                }
                                 logger.log(Level.INFO, "Staging CTSW014 RN for subject priority "
                                         + actualSubjectPriority + ".");
-                                X400Msg generated = rm.generateIPN(bindSession, -1);
-                                if (generated == null) {
-                                    summary.setReportDetails("RN was not staged: the subject message does not permit an IPN.");
+                                if (!"SS".equalsIgnoreCase(actualSubjectPriority)
+                                        && !"DD".equalsIgnoreCase(actualSubjectPriority)) {
+                                    summary.setReportDetails("RN not staged for CTSW014: subject IPM priority is "
+                                            + actualSubjectPriority + ", expected SS or DD.");
                                 } else {
-                                    synchronized (this) {
-                                        discardPendingReceiptNotification();
-                                        pendingReceiptNotification = generated;
-                                        pendingReceiptNotificationSession = bindSession;
-                                        pendingReceiptNotificationPriority = actualSubjectPriority;
+                                    X400Msg generated = rm.generateIPN(bindSession, -1);
+                                    if (generated == null) {
+                                        summary.setReportDetails("RN was not staged: the subject message does not permit an IPN.");
+                                    } else {
+                                        synchronized (this) {
+                                            pendingReceiptNotifications.add(new PendingReceiptNotification(
+                                                    generated, subjectMessageId, summary.getSubject(),
+                                                    actualSubjectPriority, summary.getSender()));
+                                            pendingReceiptNotificationSession = bindSession;
+                                        }
+                                        retainBindSession = true;
+                                        summary.setMessageId(subjectMessageId);
+                                        summary.setSubjectPriority(actualSubjectPriority);
+                                        summary.setReceiptNotificationStaged(true);
+                                        summary.setReportDetails("RN staged for CTSW014 subject "
+                                                + subjectMessageId + " with priority " + actualSubjectPriority + ".");
                                     }
-                                    retainBindSession = true;
-                                    summary.setReportDetails("RN staged for CTSW014 subject priority "
-                                            + actualSubjectPriority + ". Press Send defaults to submit it.");
                                 }
                             } else {
                                 logger.log(Level.INFO, "Message requests IPN. Automatically generating and sending IPN.");
@@ -540,9 +626,6 @@ public class AMHSMessageService {
                     }
                 }
 
-                if (retainBindSession) {
-                    break;
-                }
             }
             
             if (!retainBindSession) {
@@ -575,40 +658,120 @@ public class AMHSMessageService {
                 && trimToNull(defaults.get("subject-message-priority")) != null;
     }
 
+    private boolean isStandaloneFictitiousReceiptNotification(Map<String, String> defaults) {
+        if (defaults == null) {
+            return false;
+        }
+        return "rn".equalsIgnoreCase(trimToNull(defaults.get("message-type")))
+                && trimToNull(defaults.get("subject-ipm-id")) != null
+                && trimToNull(defaults.get("subject-message-priority")) == null;
+    }
+
     private String sendPendingReceiptNotification(Map<String, String> defaults) throws X400APIException {
         String requiredPriority = trimToNull(defaults.get("subject-message-priority"));
+        String requiredMessageId = trimToNull(defaults.get("subject-message-id"));
         synchronized (this) {
-            if (pendingReceiptNotification == null || pendingReceiptNotificationSession == null) {
+            if (pendingReceiptNotifications.isEmpty() || pendingReceiptNotificationSession == null) {
                 throw new X400APIException("CTSW014 requires a subject IPM. Select this subcase, receive an IPM "
                         + "that requests an RN and has ATS priority " + requiredPriority
                         + ", then press Send defaults again.");
             }
-            if (requiredPriority != null
-                    && !requiredPriority.equalsIgnoreCase(pendingReceiptNotificationPriority)) {
-                throw new X400APIException("The staged subject IPM has ATS priority "
-                        + pendingReceiptNotificationPriority + ", but this subcase requires "
-                        + requiredPriority + ". Receive a matching subject IPM first.");
+
+            if (requiredMessageId == null) {
+                throw new X400APIException("Select an RN Subject IPM before sending CTSW014 "
+                        + requiredPriority + ".");
+            }
+
+            PendingReceiptNotification selected = null;
+            for (PendingReceiptNotification pending : pendingReceiptNotifications) {
+                boolean idMatches = requiredMessageId.equals(pending.subjectMessageId);
+                boolean priorityMatches = requiredPriority == null
+                        || requiredPriority.equalsIgnoreCase(pending.subjectPriority);
+                if (idMatches && priorityMatches) {
+                    selected = pending;
+                    break;
+                }
+            }
+            if (selected == null) {
+                throw new X400APIException("No staged CTSW014 subject matches priority " + requiredPriority
+                        + (requiredMessageId != null ? " and message ID " + requiredMessageId : "") + ".");
             }
 
             try {
-                pendingReceiptNotification.sendMsg(pendingReceiptNotificationSession);
-                String messageId = pendingReceiptNotification.getMessageIdentifier();
-                logger.log(Level.INFO, "CTSW014 RN sent successfully with ID: " + messageId);
+                selected.message.sendMsg(pendingReceiptNotificationSession);
+                String messageId = selected.message.getMessageIdentifier();
+                logger.log(Level.INFO, "CTSW014 RN sent successfully with ID: " + messageId
+                        + ", subject: " + selected.subjectMessageId
+                        + ", priority: " + selected.subjectPriority
+                        + ", originator: " + userOrAddress
+                        + ", recipient: " + selected.receiptNotificationRecipient + ".");
                 return messageId;
             } finally {
-                discardPendingReceiptNotification();
+                deletePendingReceiptNotification(selected);
             }
         }
     }
 
-    private synchronized void discardPendingReceiptNotification() {
-        if (pendingReceiptNotification != null) {
+    public synchronized List<ReceiptNotificationSubject> getPendingReceiptNotificationSubjects() {
+        List<ReceiptNotificationSubject> subjects = new ArrayList<>();
+        for (PendingReceiptNotification pending : pendingReceiptNotifications) {
+            subjects.add(new ReceiptNotificationSubject(pending.subjectMessageId,
+                    pending.subjectPriority, pending.subject,
+                    pending.receiptNotificationRecipient));
+        }
+        return subjects;
+    }
+
+    public synchronized List<ReceiptNotificationSubject> getPendingReceiptNotificationSubjects(
+            String priority) {
+        List<ReceiptNotificationSubject> subjects = new ArrayList<>();
+        for (PendingReceiptNotification pending : pendingReceiptNotifications) {
+            if (priority != null && !priority.equalsIgnoreCase(pending.subjectPriority)) {
+                continue;
+            }
+            subjects.add(new ReceiptNotificationSubject(pending.subjectMessageId,
+                    pending.subjectPriority, pending.subject,
+                    pending.receiptNotificationRecipient));
+        }
+        return subjects;
+    }
+
+    public synchronized ReceiptNotificationSubject getFirstPendingReceiptNotificationSubject(String priority) {
+        for (PendingReceiptNotification pending : pendingReceiptNotifications) {
+            if (priority != null && priority.equalsIgnoreCase(pending.subjectPriority)) {
+                return new ReceiptNotificationSubject(pending.subjectMessageId,
+                        pending.subjectPriority, pending.subject,
+                        pending.receiptNotificationRecipient);
+            }
+        }
+        return null;
+    }
+
+    private void deletePendingReceiptNotification(PendingReceiptNotification pending) {
+        pendingReceiptNotifications.remove(pending);
+        try {
+            pending.message.delete(false);
+        } catch (Exception ex) {
+            logger.log(Level.FINE, "Error deleting pending RN object: " + ex.getMessage());
+        }
+        if (pendingReceiptNotifications.isEmpty()) {
+            closePendingReceiptNotificationSession();
+        }
+    }
+
+    private synchronized void discardPendingReceiptNotifications() {
+        for (PendingReceiptNotification pending : new ArrayList<>(pendingReceiptNotifications)) {
             try {
-                pendingReceiptNotification.delete(false);
+                pending.message.delete(false);
             } catch (Exception ex) {
                 logger.log(Level.FINE, "Error deleting pending RN object: " + ex.getMessage());
             }
         }
+        pendingReceiptNotifications.clear();
+        closePendingReceiptNotificationSession();
+    }
+
+    private void closePendingReceiptNotificationSession() {
         if (pendingReceiptNotificationSession != null) {
             try {
                 pendingReceiptNotificationSession.unbind();
@@ -616,9 +779,61 @@ public class AMHSMessageService {
                 logger.log(Level.FINE, "Error closing pending RN session: " + ex.getMessage());
             }
         }
-        pendingReceiptNotification = null;
         pendingReceiptNotificationSession = null;
-        pendingReceiptNotificationPriority = null;
+    }
+
+    private String sendStandaloneReceiptNotification(String recipient, Map<String, String> defaults)
+            throws X400APIException {
+        String configuredSubjectId = trimToNull(defaults.get("subject-ipm-id"));
+        String subjectIpmId = toSyntacticallyValidFictitiousIpmId(configuredSubjectId, recipient);
+        P7BindSession bindSession = null;
+        X400Msg receiptNotification = null;
+        try {
+            bindSession = new P7BindSession(normalizePresentationAddress(presentationAddress),
+                    userOrAddress, password);
+            bindSession.bind();
+
+            receiptNotification = new X400Msg(bindSession);
+            receiptNotification.setFrom(userOrAddress);
+            receiptNotification.setRecipient(true, 0, recipient,
+                    X400Msg.DR_Request.DR_NON_DELIVERY_REPORT, 0);
+            receiptNotification.setPriority(X400Msg.X400_Priority.NORMAL_PRIORITY);
+            receiptNotification.setIntParam(X400_att.X400_N_CONTENT_TYPE, 22);
+            receiptNotification.setIntParam(X400_att.X400_N_IS_IPN, 1);
+            receiptNotification.setStringparam(X400_att.X400_S_SUBJECT_IPM, subjectIpmId);
+            receiptNotification.setStringparam(X400_att.X400_S_RECEIPT_TIME, currentUtcTime());
+            receiptNotification.sendMsg(bindSession);
+
+            String messageId = receiptNotification.getMessageIdentifier();
+            logger.log(Level.INFO, "CTSW015 standalone RN sent with ID: " + messageId
+                    + ", originator: " + userOrAddress + ", recipient: " + recipient
+                    + ", fictitious subject IPM: " + subjectIpmId + ".");
+            return messageId;
+        } finally {
+            if (receiptNotification != null) {
+                try { receiptNotification.delete(false); } catch (Exception ex) {
+                    logger.log(Level.FINE, "Error deleting CTSW015 RN object: " + ex.getMessage());
+                }
+            }
+            if (bindSession != null) {
+                try { bindSession.unbind(); } catch (Exception ex) {
+                    logger.log(Level.FINE, "Error closing CTSW015 RN session: " + ex.getMessage());
+                }
+            }
+        }
+    }
+
+    private String toSyntacticallyValidFictitiousIpmId(String configuredValue, String recipient) {
+        if (configuredValue != null && configuredValue.contains("*") && configuredValue.contains("/")) {
+            return configuredValue;
+        }
+        return "99999999.9999*" + recipient;
+    }
+
+    private String currentUtcTime() {
+        SimpleDateFormat format = new SimpleDateFormat("yyMMddHHmmss'Z'");
+        format.setTimeZone(TimeZone.getTimeZone("UTC"));
+        return format.format(new Date());
     }
 
     private static String trimToNull(String value) {
@@ -626,6 +841,41 @@ public class AMHSMessageService {
             return null;
         }
         return value.trim();
+    }
+
+    private String validateCtsw015Ndr(com.attech.amhs.ua.isode.ReceivedMessage1 receivedMessage,
+            Map<String, String> selectedDefaults) {
+        if (!isStandaloneFictitiousReceiptNotification(selectedDefaults)) {
+            return null;
+        }
+
+        String expectedReason = trimToNull(selectedDefaults.get("expected-ndr-reason"));
+        String expectedDiagnostic = trimToNull(selectedDefaults.get("expected-ndr-diagnostic"));
+        String expectedSupplementary = trimToNull(selectedDefaults.get("expected-ndr-supplementary"));
+        boolean matched = false;
+        if (receivedMessage.getReportRecips() != null) {
+            for (com.attech.amhs.ua.isode.ReportRecipient recipient : receivedMessage.getReportRecips()) {
+                boolean reasonMatches = "unable-to-transfer".equalsIgnoreCase(expectedReason)
+                        && Integer.valueOf(1).equals(recipient.getNonDeliveryReason());
+                boolean diagnosticMatches = "invalid-arguments".equalsIgnoreCase(expectedDiagnostic)
+                        && Integer.valueOf(11).equals(recipient.getNonDeliveryDiagnosticCode());
+                String actualSupplementary = trimToNull(recipient.getSuplementInfo());
+                boolean supplementaryMatches = expectedSupplementary != null
+                        && actualSupplementary != null
+                        && actualSupplementary.trim().equalsIgnoreCase(expectedSupplementary.trim());
+                if (reasonMatches && diagnosticMatches && supplementaryMatches) {
+                    matched = true;
+                    break;
+                }
+            }
+        }
+
+        if (matched) {
+            return "CTSW015 PASS: NDR contains unable-to-transfer, invalid-arguments, and the expected supplementary information. "
+                    + "Verify IUT Control Position logging and RN storage manually.";
+        }
+        return "CTSW015 FAIL: received report does not contain all expected NDR elements "
+                + "(reason=unable-to-transfer[1], diagnostic=invalid-arguments[11], supplementary-information exact match).";
     }
     
     /**
@@ -712,6 +962,8 @@ public class AMHSMessageService {
         private String reportType;         // DR, NDR, IPN, or null for regular messages
         private String reportDetails;      // Detailed report information
         private String drRequestType;      // The DR request type set when sending
+        private String subjectPriority;
+        private boolean receiptNotificationStaged;
         
         public String getSubject() { return subject; }
         public void setSubject(String subject) { this.subject = subject; }
@@ -739,6 +991,14 @@ public class AMHSMessageService {
         
         public String getDrRequestType() { return drRequestType; }
         public void setDrRequestType(String drRequestType) { this.drRequestType = drRequestType; }
+
+        public String getSubjectPriority() { return subjectPriority; }
+        public void setSubjectPriority(String subjectPriority) { this.subjectPriority = subjectPriority; }
+
+        public boolean isReceiptNotificationStaged() { return receiptNotificationStaged; }
+        public void setReceiptNotificationStaged(boolean receiptNotificationStaged) {
+            this.receiptNotificationStaged = receiptNotificationStaged;
+        }
         
         @Override
         public String toString() {

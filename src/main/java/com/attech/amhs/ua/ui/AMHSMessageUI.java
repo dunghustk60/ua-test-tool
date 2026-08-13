@@ -88,6 +88,8 @@ public class AMHSMessageUI extends JFrame {
     private JTextField txtPayloadSize; // Generated payload size in bytes
     private JTextField txtFTBPFileName; // FTBP File Name
     private JTextArea txtFTBPContent; // FTBP Content
+    private JComboBox<AMHSMessageService.ReceiptNotificationSubject> comboCtsw014Subject;
+    private boolean updatingCtsw014SubjectSelector;
 
     // ── Constructor ───────────────────────────────────────────────────────
 
@@ -531,8 +533,36 @@ public class AMHSMessageUI extends JFrame {
         txtFTBPContent.setToolTipText("Content for file-transfer-body-part (will be converted to bytes)");
         panel.add(new JScrollPane(txtFTBPContent), gbc);
 
-        // Buttons
+        // CTSW014 subject selection (populated when matching subject IPMs are received)
+        gbc.gridx = 0;
         gbc.gridy = 12;
+        gbc.gridwidth = 1;
+        gbc.weightx = 0;
+        gbc.weighty = 0;
+        gbc.fill = GridBagConstraints.HORIZONTAL;
+        panel.add(new JLabel("RN Subject IPM:"), gbc);
+        gbc.gridx = 1;
+        gbc.gridwidth = 3;
+        gbc.weightx = 1.0;
+        comboCtsw014Subject = new JComboBox<>();
+        comboCtsw014Subject.setToolTipText("CTSW014 subject message ID, ATS priority, and subject");
+        comboCtsw014Subject.setEnabled(false);
+        comboCtsw014Subject.addActionListener(e -> {
+            if (updatingCtsw014SubjectSelector) {
+                return;
+            }
+            AMHSMessageService.ReceiptNotificationSubject selected =
+                    (AMHSMessageService.ReceiptNotificationSubject) comboCtsw014Subject.getSelectedItem();
+            if (selected != null) {
+                appendOutput("Selected CTSW014 subject: " + selected.getMessageId()
+                        + " | priority=" + selected.getPriority()
+                        + " | RN recipient=" + selected.getRecipient());
+            }
+        });
+        panel.add(comboCtsw014Subject, gbc);
+
+        // Buttons
+        gbc.gridy = 13;
         gbc.gridwidth = 1;
         gbc.weightx = 0;
         gbc.weighty = 0;
@@ -935,6 +965,11 @@ public class AMHSMessageUI extends JFrame {
         final Map<String, String> receiveDefaults = selectedSubcase != null
                 ? new java.util.HashMap<>(selectedSubcase.getAmhsDefaults())
                 : java.util.Collections.emptyMap();
+        final boolean receivingCtsw014Subjects = "rn".equalsIgnoreCase(receiveDefaults.get("message-type"))
+                && receiveDefaults.containsKey("subject-message-priority");
+        if (receivingCtsw014Subjects) {
+            clearCtsw014SubjectSelector(true);
+        }
 
         new Thread(() -> {
             try {
@@ -945,11 +980,18 @@ public class AMHSMessageUI extends JFrame {
                 }
                 List<AMHSMessageService.MessageSummary> msgs = messageService.receiveMessages(all.size(), receiveDefaults);
                 SwingUtilities.invokeLater(() -> {
+                    if (receivingCtsw014Subjects) {
+                        refreshCtsw014SubjectSelector(
+                                receiveDefaults.get("subject-message-priority"), null);
+                    }
                     appendOutput("Received " + msgs.size() + " message(s):");
                     for (AMHSMessageService.MessageSummary m : msgs) {
                         appendOutput("From: " + m.getSender() + "  Subject: " + m.getSubject()
                                 + (m.getReportType() != null ? "  [" + m.getReportType() + " Report]" : ""));
                         if (m.getReportDetails() != null && m.getReportDetails().startsWith("RN staged")) {
+                            appendOutput(m.getReportDetails());
+                        }
+                        if (m.getReportDetails() != null && m.getReportDetails().startsWith("CTSW015")) {
                             appendOutput(m.getReportDetails());
                         }
                         addMessageToMarkingPanel(m.getSender(), txtUserOrAddress.getText().trim(), m.getSubject(),
@@ -1021,14 +1063,17 @@ public class AMHSMessageUI extends JFrame {
         TestSubcase sc = getSelectedSubcase();
         if (sc == null) {
             loadBootDefaults();
+            refreshCtsw014SubjectSelectorForSubcase(null);
             appendOutput("Loaded default configuration (boot baseline).");
             return;
         }
         if (sc.getAmhsDefaults().isEmpty()) {
+            refreshCtsw014SubjectSelectorForSubcase(sc);
             appendOutput("No default configuration available for selected subcase");
             return;
         }
         applyDefaults(sc.getAmhsDefaults());
+        refreshCtsw014SubjectSelectorForSubcase(sc);
         appendOutput("Loaded default configuration for subcase: " + sc.getId());
     }
 
@@ -1048,6 +1093,23 @@ public class AMHSMessageUI extends JFrame {
         // original definition so manual edits never alter "Send defaults".
         Map<String, String> defaults = new java.util.HashMap<>(currentSubcase.getAmhsDefaults());
         applyDefaults(defaults);
+
+        if ("rn".equalsIgnoreCase(defaults.get("message-type"))
+                && defaults.containsKey("subject-message-priority")) {
+            AMHSMessageService.ReceiptNotificationSubject selectedSubject =
+                    comboCtsw014Subject != null
+                    ? (AMHSMessageService.ReceiptNotificationSubject) comboCtsw014Subject.getSelectedItem()
+                    : null;
+            if (selectedSubject == null) {
+                appendOutput("CTSW014 requires an RN Subject IPM selection for priority "
+                        + defaults.get("subject-message-priority") + ".");
+                return;
+            }
+            defaults.put("subject-message-id", selectedSubject.getMessageId());
+            appendOutput("Sending CTSW014 RN for subject " + selectedSubject.getMessageId()
+                    + " | priority=" + selectedSubject.getPriority()
+                    + " | recipient=" + selectedSubject.getRecipient());
+        }
 
         final String recipient = firstNonEmptyValue(defaults, "primary-recipients", "recipient");
         final String subject = valueOrDefault(defaults.get("subject"), "Test - " + currentSubcase.getId());
@@ -1069,6 +1131,15 @@ public class AMHSMessageUI extends JFrame {
                 String msgId = messageService.sendMessage(recipient, subject, content, priority, defaults);
                 SwingUtilities.invokeLater(() -> {
                     appendOutput("Defaults sent successfully. Message ID: " + msgId);
+                    if (defaults.containsKey("subject-message-priority")) {
+                        appendOutput("CTSW014 manual checks: verify Control Position logging/reporting; "
+                                + ("DD".equalsIgnoreCase(defaults.get("subject-message-priority"))
+                                ? "verify the priority error and stored RN." : "verify the SS RN was not rejected."));
+                        refreshCtsw014SubjectSelector(defaults.get("subject-message-priority"), null);
+                    } else if ("rn".equalsIgnoreCase(defaults.get("message-type"))) {
+                        appendOutput("CTSW015 RN submitted. Receive the returned NDR, then verify IUT error logging, "
+                                + "Control Position reporting, and RN storage manually.");
+                    }
                     logSend(recipient, subject, content, priority, true, defaults);
                 });
             } catch (Throwable t) {
@@ -1087,6 +1158,18 @@ public class AMHSMessageUI extends JFrame {
         if (tc == null || tc.getSubcases() == null || tc.getSubcases().isEmpty()) {
             appendOutput("No test case selected or no subcases defined.");
             return;
+        }
+
+        if ("CTSW014".equalsIgnoreCase(tc.getId())) {
+            AMHSMessageService.ReceiptNotificationSubject ssSubject =
+                    messageService.getFirstPendingReceiptNotificationSubject("SS");
+            AMHSMessageService.ReceiptNotificationSubject ddSubject =
+                    messageService.getFirstPendingReceiptNotificationSubject("DD");
+            if (ssSubject == null || ddSubject == null) {
+                appendOutput("CTSW014 Send All requires one staged SS subject and one staged DD subject. "
+                        + "Select CTSW014, receive both subject IPMs, then try again.");
+                return;
+            }
         }
 
         appendOutput("Sending messages for all " + tc.getSubcases().size() + " subcases of " + tc.getId() + "...");
@@ -1135,13 +1218,28 @@ public class AMHSMessageUI extends JFrame {
                     }
 
                     // Auto-apply last sent IPM ID for RNs if not properly configured
-                    if ("rn".equalsIgnoreCase(defaults.get("message-type"))) {
+                    if ("rn".equalsIgnoreCase(defaults.get("message-type"))
+                            && !defaults.containsKey("subject-message-priority")) {
                         String currentId = defaults.get("subject-ipm-id");
                         if ((currentId == null || currentId.trim().isEmpty() || currentId.contains("PREVIOUSLY-SENT")) && lastSentIpmId != null) {
                             defaults.put("subject-ipm-id", lastSentIpmId);
                             final String appliedId = lastSentIpmId;
                             SwingUtilities.invokeLater(() -> appendOutput("Auto-applied subject-ipm-id: " + appliedId + " for RN " + sc.getId()));
                         }
+                    }
+
+                    if ("CTSW014".equalsIgnoreCase(tc.getId())) {
+                        AMHSMessageService.ReceiptNotificationSubject stagedSubject =
+                                messageService.getFirstPendingReceiptNotificationSubject(
+                                        defaults.get("subject-message-priority"));
+                        if (stagedSubject == null) {
+                            throw new X400APIException("No staged subject for CTSW014 priority "
+                                    + defaults.get("subject-message-priority"));
+                        }
+                        defaults.put("subject-message-id", stagedSubject.getMessageId());
+                        SwingUtilities.invokeLater(() -> appendOutput("CTSW014 Send All selected subject "
+                                + stagedSubject.getMessageId() + " | priority=" + stagedSubject.getPriority()
+                                + " | recipient=" + stagedSubject.getRecipient()));
                     }
 
                     String msgId = messageService.sendMessage(recipient, subject, content, priority, defaults);
@@ -1164,7 +1262,14 @@ public class AMHSMessageUI extends JFrame {
 
             int finalSuccessCount = successCount;
             int finalFailCount = failCount;
-            SwingUtilities.invokeLater(() -> appendOutput("Completed: " + finalSuccessCount + " succeeded, " + finalFailCount + " failed."));
+            SwingUtilities.invokeLater(() -> {
+                appendOutput("Completed: " + finalSuccessCount + " succeeded, " + finalFailCount + " failed.");
+                if ("CTSW014".equalsIgnoreCase(tc.getId())) {
+                    refreshCtsw014SubjectSelectorForSubcase(getSelectedSubcase());
+                    appendOutput("CTSW014 manual checks: verify SS was not rejected and was reported; "
+                            + "verify DD caused an error, was reported, and was stored at the Control Position.");
+                }
+            });
         }).start();
     }
 
@@ -1213,6 +1318,101 @@ public class AMHSMessageUI extends JFrame {
             }
         }
         return null;
+    }
+
+    private void refreshCtsw014SubjectSelectorForSubcase(TestSubcase subcase) {
+        if (subcase == null || subcase.getAmhsDefaults() == null
+                || !"rn".equalsIgnoreCase(subcase.getAmhsDefaults().get("message-type"))) {
+            clearCtsw014SubjectSelector(false);
+            return;
+        }
+        refreshCtsw014SubjectSelector(
+                subcase.getAmhsDefaults().get("subject-message-priority"), null);
+    }
+
+    private void refreshCtsw014SubjectSelector(String requiredPriority, String preferredMessageId) {
+        if (comboCtsw014Subject == null || requiredPriority == null) {
+            clearCtsw014SubjectSelector(false);
+            return;
+        }
+
+        AMHSMessageService.ReceiptNotificationSubject oldSelection =
+                (AMHSMessageService.ReceiptNotificationSubject) comboCtsw014Subject.getSelectedItem();
+        String selectionId = preferredMessageId != null ? preferredMessageId
+                : oldSelection != null ? oldSelection.getMessageId() : null;
+
+        List<AMHSMessageService.ReceiptNotificationSubject> matchingSubjects =
+                messageService.getPendingReceiptNotificationSubjects(requiredPriority);
+        DefaultComboBoxModel<AMHSMessageService.ReceiptNotificationSubject> model =
+                new DefaultComboBoxModel<>();
+        AMHSMessageService.ReceiptNotificationSubject itemToSelect = null;
+        for (AMHSMessageService.ReceiptNotificationSubject staged : matchingSubjects) {
+            model.addElement(staged);
+            if (selectionId != null && selectionId.equals(staged.getMessageId())) {
+                itemToSelect = staged;
+            }
+        }
+
+        updatingCtsw014SubjectSelector = true;
+        try {
+            comboCtsw014Subject.setModel(model);
+            if (itemToSelect != null) {
+                comboCtsw014Subject.setSelectedItem(itemToSelect);
+            } else if (model.getSize() > 0) {
+                comboCtsw014Subject.setSelectedIndex(0);
+            }
+            boolean hasSubjects = model.getSize() > 0;
+            comboCtsw014Subject.setEnabled(hasSubjects);
+            AMHSMessageService.ReceiptNotificationSubject selected = hasSubjects
+                    ? (AMHSMessageService.ReceiptNotificationSubject) comboCtsw014Subject.getSelectedItem()
+                    : null;
+            comboCtsw014Subject.setToolTipText(selected != null
+                    ? "Message ID: " + selected.getMessageId()
+                            + " | RN recipient: " + selected.getRecipient()
+                    : "No staged " + requiredPriority + " subject IPM is available");
+            comboCtsw014Subject.revalidate();
+            comboCtsw014Subject.repaint();
+        } finally {
+            updatingCtsw014SubjectSelector = false;
+        }
+
+        if (model.getSize() > 0) {
+            AMHSMessageService.ReceiptNotificationSubject selected =
+                    (AMHSMessageService.ReceiptNotificationSubject) comboCtsw014Subject.getSelectedItem();
+            appendOutput("RN Subject IPM selector loaded " + model.getSize() + " "
+                    + requiredPriority + " subject(s). Selected: " + selected.getMessageId());
+        } else {
+            StringBuilder stagedPriorities = new StringBuilder();
+            for (AMHSMessageService.ReceiptNotificationSubject staged
+                    : messageService.getPendingReceiptNotificationSubjects()) {
+                String priority = staged.getPriority() != null ? staged.getPriority() : "unknown";
+                if (stagedPriorities.indexOf(priority) < 0) {
+                    if (stagedPriorities.length() > 0) {
+                        stagedPriorities.append(", ");
+                    }
+                    stagedPriorities.append(priority);
+                }
+            }
+            appendOutput("No staged " + requiredPriority + " subject IPM is available. "
+                    + "Staged priorities: "
+                    + (stagedPriorities.length() > 0 ? stagedPriorities : "none"));
+        }
+    }
+
+    private void clearCtsw014SubjectSelector(boolean receiving) {
+        if (comboCtsw014Subject == null) {
+            return;
+        }
+        updatingCtsw014SubjectSelector = true;
+        try {
+            comboCtsw014Subject.removeAllItems();
+            comboCtsw014Subject.setEnabled(false);
+            comboCtsw014Subject.setToolTipText(receiving
+                    ? "Receiving and staging CTSW014 subject IPMs..."
+                    : "Available only for CTSW014");
+        } finally {
+            updatingCtsw014SubjectSelector = false;
+        }
     }
 
     private String valueOrDefault(String value, String defaultValue) {

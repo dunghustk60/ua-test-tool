@@ -77,7 +77,7 @@ public class TestCaseTemplate {
         // CTSW014 - Signed Message
         testCases.add(createCTSW014());
         
-        // CTSW015 - Message Expiry
+        // CTSW015 - RN without a related subject message
         testCases.add(createCTSW015());
         
         // CTSW016 - Reply to Message
@@ -488,13 +488,14 @@ public class TestCaseTemplate {
     
 
     private static TestCase createCTSW015() {
-        TestCase tc = TestCaseLoader.createTestCase("CTSW015", "Message Expiry", 1);
+        TestCase tc = TestCaseLoader.createTestCase("CTSW015", "RN without related subject message", 1);
         TestSubcase sub = tc.getSubcases().get(0);
-        sub.setDescription("Test message expiry");
+        sub.setDescription("RN with a fictitious subject IPM");
         sub.setAmhsDefault("recipient", "/CN=VVTSMHSA/OU=VVTS/O=VVTS/PRMD=VIETNAM/ADMD=ICAO/C=XX/");
-        sub.setAmhsDefault("subject", "CTSW015 - Message Expiry");
-        sub.setAmhsDefault("priority", "NORMAL");
-        sub.setAmhsDefault("content", "Message expiry test.");
+        sub.setAmhsDefault("subject", "CTSW015.1");
+        sub.setAmhsDefault("message-type", "rn");
+        sub.setAmhsDefault("subject-ipm-id", "99999999.9999*/CN=VVTSMHSA/OU=VVTS/O=VVTS/PRMD=VIETNAM/ADMD=ICAO/C=XX/");
+        sub.setAmhsDefault("content", "RN with fictitious subject IPM");
         return tc;
     }
 

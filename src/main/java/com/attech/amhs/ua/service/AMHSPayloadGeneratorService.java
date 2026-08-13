@@ -158,9 +158,10 @@ public class AMHSPayloadGeneratorService {
         EIT_OID_MAP.put("id-cs-eit-authority-100", "2.16.840.1.101.2.1.22.100"); // proprietary
         // File-transfer EIT (id-eit-file-transfer 0 per EUR Doc 047)
         EIT_OID_MAP.put("id-eit-file-transfer-0",  "2.16.840.1.101.2.1.22.6");  // maps to FTBP
-        // Map known-valid built-ins to their canonical textual form (e.g. ia5-text).
-        // Leave invalid built-in values like 0 unmapped so they are emitted as numeric
-        // tokens and rejected by the IUT/gateway as intended.
+        // The Isode string API requires symbolic EIT names. "undefined" is a
+        // syntactically valid representation of the unsupported built-in value 0,
+        // allowing CTSW016.2 to reach the IUT and be rejected there with an NDR.
+        BUILTIN_EIT_MAP.put("0", "undefined");
         BUILTIN_EIT_MAP.put("2", "ia5-text");
     }
 
@@ -771,9 +772,13 @@ public class AMHSPayloadGeneratorService {
                     System.out.println("builtinValue: " + builtinValue);
                     if (builtinValue != null) {
                         eitTokens.add(builtinValue);
+                        logger.info("[CTSW016] EIT built-in: configured={}, encoded={}",
+                                eitBuiltin.trim(), builtinValue);
                     } else {
                         // Leave unknown numeric built-ins as-is so gateway can reject them
                         eitTokens.add(eitBuiltin.trim());
+                        logger.info("[CTSW016] EIT built-in: configured={}, encoded={}",
+                                eitBuiltin.trim(), eitBuiltin.trim());
                     }
                 }
                 // Add extended EIT OIDs
@@ -1255,8 +1260,12 @@ public class AMHSPayloadGeneratorService {
                     String builtinValue = BUILTIN_EIT_MAP.get(eitBuiltin.trim());
                     if (builtinValue != null) {
                         eitTokens.add(builtinValue);
+                        logger.info("[CTSW016] EIT built-in: configured={}, encoded={}",
+                                eitBuiltin.trim(), builtinValue);
                     } else {
                         eitTokens.add(eitBuiltin.trim());
+                        logger.info("[CTSW016] EIT built-in: configured={}, encoded={}",
+                                eitBuiltin.trim(), eitBuiltin.trim());
                     }
                 }
                 for (String oid : eitOidList) {
