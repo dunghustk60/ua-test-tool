@@ -920,7 +920,10 @@ public class AMHSPayloadGeneratorService {
             String atsPriority = normalizedDefaults.containsKey("ats-priority")
                     ? normalizedDefaults.get("ats-priority")
                     : firstNonEmpty(normalizedDefaults, "priority-indicator", "subject-message-priority");
-            if (atsPriority == null) {
+            // When per-recipient precedence is present, the receiving IUT must derive
+            // its AMQP priority and amhs_ats_pri from the highest precedence. Do not
+            // mask that behavior by copying the GUI/default ATS priority into the IPM.
+            if (atsPriority == null && recipientPrecedences.isEmpty()) {
                 atsPriority = effectivePriority;
             }
             if (atsPriority != null) {
