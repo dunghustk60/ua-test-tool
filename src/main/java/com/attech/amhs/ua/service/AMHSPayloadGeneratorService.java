@@ -10,7 +10,9 @@ import com.isode.x400.highlevel.BodypartGeneralText;
 import com.isode.x400.highlevel.BodypartFTBP;
 import com.isode.x400api.AMHS_att;
 import com.isode.x400api.MSMessage;
+import com.isode.x400api.Recip;
 import com.isode.x400api.X400_att;
+import com.isode.x400api.X400ms;
 import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
 import java.time.ZoneOffset;
@@ -87,6 +89,7 @@ public class AMHSPayloadGeneratorService {
 
         // Recipient lists
         EMPTY_DEFAULTS.put("primary-recipients", "");
+        EMPTY_DEFAULTS.put("recipient-precedences", "");
         EMPTY_DEFAULTS.put("copy-recipients", "");
         EMPTY_DEFAULTS.put("bcc-recipients", "");
         EMPTY_DEFAULTS.put("recipient-file", "");
@@ -453,6 +456,67 @@ public class AMHSPayloadGeneratorService {
         return recipients;
     }
 
+    private List<String> resolvePerRecipientValues(Map<String, String> amhsDefaults,
+            String key, String fallbackKey, int recipientCount) throws X400APIException {
+        String configured = amhsDefaults != null ? amhsDefaults.get(key) : null;
+        if ((configured == null || configured.trim().isEmpty()) && fallbackKey != null) {
+            configured = amhsDefaults != null ? amhsDefaults.get(fallbackKey) : null;
+        }
+        List<String> values = new ArrayList<>();
+        if (configured == null || configured.trim().isEmpty()) {
+            return values;
+        }
+        for (String value : configured.split(",")) {
+            if (!value.trim().isEmpty()) {
+                values.add(value.trim());
+            }
+        }
+        if (values.size() == 1 && recipientCount > 1) {
+            String repeated = values.get(0);
+            while (values.size() < recipientCount) {
+                values.add(repeated);
+            }
+        }
+        if (values.size() != recipientCount) {
+            throw new X400APIException(key + " count " + values.size()
+                    + " does not match primary recipient count " + recipientCount);
+        }
+        return values;
+    }
+
+    private int parseRecipientPrecedence(String configured, int recipientIndex)
+            throws X400APIException {
+        try {
+            return Integer.parseInt(configured);
+        } catch (NumberFormatException e) {
+            throw new X400APIException("Invalid precedence for primary recipient "
+                    + (recipientIndex + 1) + ": " + configured);
+        }
+    }
+
+    private int parseRecipientResponsibility(String configured, int recipientIndex)
+            throws X400APIException {
+        if ("responsible".equalsIgnoreCase(configured) || "1".equals(configured)) {
+            return 1;
+        }
+        if ("non-responsible".equalsIgnoreCase(configured)
+                || "not-responsible".equalsIgnoreCase(configured)
+                || "0".equals(configured)) {
+            return 0;
+        }
+        throw new X400APIException("Invalid responsibility for primary recipient "
+                + (recipientIndex + 1) + ": " + configured);
+    }
+
+    private void addRecipientIntParam(Recip recipient, int attribute, int value,
+            String attributeName, int recipientIndex) throws X400APIException {
+        int status = X400ms.x400_ms_recipaddintparam(recipient, attribute, value);
+        if (status != 0) {
+            throw new X400APIException(attributeName + " for primary recipient "
+                    + (recipientIndex + 1) + ": x400_ms_recipaddintparam failed", status);
+        }
+    }
+
     private String padContent(String content, int length) {
         if (length <= 0) {
             return content != null ? content : "";
@@ -634,19 +698,6 @@ public class AMHSPayloadGeneratorService {
             }
         }
 
-        // Precedence
-        String precedenceStr = amhsDefaults.get("precedence");
-        if (precedenceStr != null && !precedenceStr.trim().isEmpty()) {
-            try {
-                int precedence = Integer.parseInt(precedenceStr.trim());
-                message.setIntParam(X400_att.X400_N_PRECEDENCE, precedence);
-            } catch (NumberFormatException e) {
-                logger.warn("Invalid precedence value: {}", precedenceStr);
-            } catch (Exception e) {
-                logger.warn("Failed to set precedence: {}", e.getMessage());
-            }
-        }
-
         // Authorization Time
         String authTime = amhsDefaults.get("authorization-time");
         if (authTime != null && !authTime.trim().isEmpty()) {
@@ -654,22 +705,6 @@ public class AMHSPayloadGeneratorService {
                 message.setStringparam(X400_att.X400_S_AUTHORIZATION_TIME, authTime.trim());
             } catch (Exception e) {
                 logger.warn("Failed to set authorization-time: {}", e.getMessage());
-            }
-        }
-
-        // Responsibility
-        String responsibility = amhsDefaults.get("responsibility");
-        if (responsibility != null && !responsibility.trim().isEmpty()) {
-            try {
-                // If multiple values provided, use the first one and log a warning for API limitation
-                String[] respParts = responsibility.split(",");
-                if (respParts.length > 1) {
-                    logger.warn("Per-recipient responsibility not supported by high-level API. Using first value: {}", respParts[0]);
-                }
-                int respValue = "responsible".equalsIgnoreCase(respParts[0].trim()) ? 1 : 0;
-                message.setIntParam(X400_att.X400_N_RESPONSIBILITY, respValue);
-            } catch (Exception e) {
-                logger.warn("Failed to set responsibility: {}", e.getMessage());
             }
         }
 
@@ -739,16 +774,6 @@ public class AMHSPayloadGeneratorService {
                 message.setIntParam(X400_att.X400_N_NOTIFICATION_REQUEST, notifValue);
             } catch (Exception e) {
                 logger.warn("Failed to set receipt-notification: {}", e.getMessage());
-            }
-        }
-
-        // === PRECEDENCE FOR ALL RECIPIENTS (CTSW020) ===
-        if (precedenceStr != null && !precedenceStr.trim().isEmpty()) {
-            try {
-                int prec = Integer.parseInt(precedenceStr.trim());
-                message.setAllRecipPrecedence(prec);
-            } catch (Exception e) {
-                logger.warn("Failed to set all-recip precedence: {}", e.getMessage());
             }
         }
 
@@ -840,8 +865,26 @@ public class AMHSPayloadGeneratorService {
             // get delivery report
             X400Msg.DR_Request drRequest = getDrRequest(normalizedDefaults);
             int ipnRequest = getIpnRequest(normalizedDefaults);
-            for (String to : toRecipients) {
-                message.setTo(to, drRequest, ipnRequest);
+            List<String> recipientPrecedences = resolvePerRecipientValues(normalizedDefaults,
+                    "recipient-precedences", "precedence", toRecipients.size());
+            List<String> recipientResponsibilities = resolvePerRecipientValues(normalizedDefaults,
+                    "responsibility", null, toRecipients.size());
+            for (int i = 0; i < toRecipients.size(); i++) {
+                Recip recipientObject = message.setTo(toRecipients.get(i), drRequest, ipnRequest);
+                if (!recipientPrecedences.isEmpty()) {
+                    int precedence = parseRecipientPrecedence(recipientPrecedences.get(i), i);
+                    addRecipientIntParam(recipientObject, X400_att.X400_N_PRECEDENCE,
+                            precedence, "precedence", i);
+                }
+                if (!recipientResponsibilities.isEmpty()) {
+                    int responsibility = parseRecipientResponsibility(recipientResponsibilities.get(i), i);
+                    addRecipientIntParam(recipientObject, X400_att.X400_N_RESPONSIBILITY,
+                            responsibility, "responsibility", i);
+                }
+                logger.info("Primary recipient {} configured: address={}, precedence={}, responsibility={}",
+                        i + 1, toRecipients.get(i),
+                        recipientPrecedences.isEmpty() ? "unset" : recipientPrecedences.get(i),
+                        recipientResponsibilities.isEmpty() ? "unset" : recipientResponsibilities.get(i));
             }
 
             // ── SUBJECT ──────────────────────────────────────────────────────
@@ -1015,20 +1058,6 @@ public class AMHSPayloadGeneratorService {
 
         // === EXTENDED IPM ATTRIBUTES ===
 
-        // Precedence - For extended IPMs (values: 14, 28, 57, 71, 107)
-        String precedenceStr = amhsDefaults.get("precedence");
-        if (precedenceStr != null && !precedenceStr.trim().isEmpty()) {
-            try {
-                int precedence = Integer.parseInt(precedenceStr.trim());
-                message.setIntParam(X400_att.X400_N_PRECEDENCE, precedence);
-                logger.debug("Set precedence: {}", precedence);
-            } catch (NumberFormatException e) {
-                logger.warn("Invalid precedence value: {}", precedenceStr);
-            } catch (Exception e) {
-                logger.warn("Failed to set precedence: {}", e.getMessage());
-            }
-        }
-
         // Authorization Time - For extended IPMs
         String authTime = amhsDefaults.get("authorization-time");
         if (authTime != null && !authTime.trim().isEmpty()) {
@@ -1037,18 +1066,6 @@ public class AMHSPayloadGeneratorService {
                 logger.debug("Set authorization-time: {}", authTime);
             } catch (Exception e) {
                 logger.warn("Failed to set authorization-time: {}", e.getMessage());
-            }
-        }
-
-        // Responsibility Indicator
-        String responsibility = amhsDefaults.get("responsibility");
-        if (responsibility != null && !responsibility.trim().isEmpty()) {
-            try {
-                int respValue = "responsible".equalsIgnoreCase(responsibility.trim()) ? 1 : 0;
-                message.setIntParam(X400_att.X400_N_RESPONSIBILITY, respValue);
-                logger.debug("Set responsibility: {} ({})", responsibility, respValue);
-            } catch (Exception e) {
-                logger.warn("Failed to set responsibility: {}", e.getMessage());
             }
         }
 
@@ -1096,22 +1113,6 @@ public class AMHSPayloadGeneratorService {
         if (notifyControlPos != null && !notifyControlPos.trim().isEmpty()) {
             logger.info("[CTSW020] notify-control-position='{}' - no native API constant available; "
                     + "configure at gateway level", notifyControlPos);
-        }
-
-        // === PRECEDENCE (CTSW020 - extended IPM) ===
-        // Already handled above via X400_N_PRECEDENCE. setAllRecipPrecedence is an
-        // additional
-        // call to ensure precedence propagates to all recipients uniformly.
-        if (precedenceStr != null && !precedenceStr.trim().isEmpty()) {
-            try {
-                int prec = Integer.parseInt(precedenceStr.trim());
-                message.setAllRecipPrecedence(prec);
-                logger.debug("Set all-recip precedence: {}", prec);
-            } catch (NumberFormatException e) {
-                logger.warn("Invalid precedence value for setAllRecipPrecedence: {}", precedenceStr);
-            } catch (Exception e) {
-                logger.warn("Failed to set all-recip precedence: {}", e.getMessage());
-            }
         }
 
         // Latest Delivery Time
