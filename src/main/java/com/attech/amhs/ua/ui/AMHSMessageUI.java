@@ -1111,10 +1111,18 @@ public class AMHSMessageUI extends JFrame {
                     + " | recipient=" + selectedSubject.getRecipient());
         }
 
-        final String recipient = firstNonEmptyValue(defaults, "primary-recipients", "recipient");
-        final String subject = valueOrDefault(defaults.get("subject"), "Test - " + currentSubcase.getId());
-        final String content = valueOrDefault(defaults.get("content"), "Message for " + currentSubcase.getId());
-        final X400_Priority priority = toX400Priority(firstNonEmptyValue(defaults,
+        final Map<String, String> resolvedDefaults;
+        try {
+            resolvedDefaults = messageService.resolveDynamicAmhsDefaults(defaults);
+        } catch (IllegalArgumentException e) {
+            appendOutput("Send defaults failed: " + e.getMessage());
+            return;
+        }
+
+        final String recipient = firstNonEmptyValue(resolvedDefaults, "primary-recipients", "recipient");
+        final String subject = valueOrDefault(resolvedDefaults.get("subject"), "Test - " + currentSubcase.getId());
+        final String content = valueOrDefault(resolvedDefaults.get("content"), "Message for " + currentSubcase.getId());
+        final X400_Priority priority = toX400Priority(firstNonEmptyValue(resolvedDefaults,
                 "priority", "ats-priority", "priority-indicator"));
 
         if (recipient == null || recipient.isEmpty() || subject.isEmpty() || content.isEmpty()) {
@@ -1122,25 +1130,38 @@ public class AMHSMessageUI extends JFrame {
             return;
         }
 
+        appendOutput("Sending defaults: recipient=" + recipient
+                + " | latest-delivery-time="
+                + valueOrDefault(resolvedDefaults.get("latest-delivery-time"), "not set"));
+        appendOutput("Effective defaults: ATS priority="
+                + valueOrDefault(firstNonEmptyValue(resolvedDefaults,
+                        "ats-priority", "priority-indicator", "subject-message-priority"), "not set")
+                + " | DR request="
+                + valueOrDefault(resolvedDefaults.get("originator-report-request"), "default NDR")
+                + " | RN request="
+                + valueOrDefault(resolvedDefaults.get("receipt-notification"), "default NRN")
+                + " | MTA report request="
+                + valueOrDefault(resolvedDefaults.get("originating-mta-report-request"), "not set"));
+
         if (SettingsDialog.isClearOldLogsOnSend() && markingPanel != null) {
             markingPanel.clearSentMessages();
         }
 
         new Thread(() -> {
             try {
-                String msgId = messageService.sendMessage(recipient, subject, content, priority, defaults);
+                String msgId = messageService.sendMessage(recipient, subject, content, priority, resolvedDefaults);
                 SwingUtilities.invokeLater(() -> {
                     appendOutput("Defaults sent successfully. Message ID: " + msgId);
-                    if (defaults.containsKey("subject-message-priority")) {
+                    if (resolvedDefaults.containsKey("subject-message-priority")) {
                         appendOutput("CTSW014 manual checks: verify Control Position logging/reporting; "
-                                + ("DD".equalsIgnoreCase(defaults.get("subject-message-priority"))
+                                + ("DD".equalsIgnoreCase(resolvedDefaults.get("subject-message-priority"))
                                 ? "verify the priority error and stored RN." : "verify the SS RN was not rejected."));
-                        refreshCtsw014SubjectSelector(defaults.get("subject-message-priority"), null);
-                    } else if ("rn".equalsIgnoreCase(defaults.get("message-type"))) {
+                        refreshCtsw014SubjectSelector(resolvedDefaults.get("subject-message-priority"), null);
+                    } else if ("rn".equalsIgnoreCase(resolvedDefaults.get("message-type"))) {
                         appendOutput("CTSW015 RN submitted. Receive the returned NDR, then verify IUT error logging, "
                                 + "Control Position reporting, and RN storage manually.");
                     }
-                    logSend(recipient, subject, content, priority, true, defaults);
+                    logSend(recipient, subject, content, priority, true, resolvedDefaults);
                 });
             } catch (Throwable t) {
                 SwingUtilities.invokeLater(() -> appendOutput("Send defaults failed: " + t.getMessage()));

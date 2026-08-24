@@ -23,6 +23,8 @@ import java.util.Map;
 import java.util.Arrays;
 import java.util.List;
 import java.util.ArrayList;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -31,6 +33,11 @@ import org.slf4j.LoggerFactory;
  * Supports all AMHS fields required by EUR Doc 047 Appendix A test cases
  */
 public class AMHSPayloadGeneratorService {
+
+    private static final DateTimeFormatter UTC_TIME_FORMATTER =
+            DateTimeFormatter.ofPattern("yyMMddHHmmss'Z'");
+    private static final Pattern RELATIVE_UTC_TIME =
+            Pattern.compile("(?i)^now(?:([+-])(\\d+)([dhms]))?$");
 
     /**
      * Default empty AMHS message fields for first boot
@@ -114,6 +121,60 @@ public class AMHSPayloadGeneratorService {
     }
 
     private static final Logger logger = LoggerFactory.getLogger(AMHSPayloadGeneratorService.class);
+
+    /**
+     * Return an independent defaults map with relative time expressions resolved.
+     * Supported latest-delivery-time values are now, now+/-Nd, now+/-Nh,
+     * now+/-Nm and now+/-Ns. Literal values are preserved unchanged.
+     */
+    public Map<String, String> resolveDynamicAmhsDefaults(Map<String, String> amhsDefaults) {
+        Map<String, String> resolved = amhsDefaults != null
+                ? new HashMap<>(amhsDefaults) : new HashMap<>();
+        String configuredTime = resolved.get("latest-delivery-time");
+        if (configuredTime == null || configuredTime.trim().isEmpty()) {
+            return resolved;
+        }
+
+        String expression = configuredTime.trim();
+        Matcher matcher = RELATIVE_UTC_TIME.matcher(expression);
+        if (!matcher.matches()) {
+            if (expression.toLowerCase().startsWith("now")) {
+                throw new IllegalArgumentException("Invalid relative latest-delivery-time: "
+                        + configuredTime + ". Expected now, now-1d, now+1d, now+2h, now-30m, or now+15s.");
+            }
+            return resolved;
+        }
+
+        ZonedDateTime resolvedTime = ZonedDateTime.now(ZoneOffset.UTC);
+        if (matcher.group(1) != null) {
+            long amount = Long.parseLong(matcher.group(2));
+            if ("-".equals(matcher.group(1))) {
+                amount = -amount;
+            }
+            switch (matcher.group(3).toLowerCase()) {
+                case "d":
+                    resolvedTime = resolvedTime.plusDays(amount);
+                    break;
+                case "h":
+                    resolvedTime = resolvedTime.plusHours(amount);
+                    break;
+                case "m":
+                    resolvedTime = resolvedTime.plusMinutes(amount);
+                    break;
+                case "s":
+                    resolvedTime = resolvedTime.plusSeconds(amount);
+                    break;
+                default:
+                    throw new IllegalArgumentException("Unsupported latest-delivery-time unit: "
+                            + matcher.group(3));
+            }
+        }
+
+        String utcTime = UTC_TIME_FORMATTER.format(resolvedTime);
+        resolved.put("latest-delivery-time", utcTime);
+        logger.info("Resolved latest-delivery-time {} to {}", configuredTime, utcTime);
+        return resolved;
+    }
 
     /**
      * ATS Priority to X.400 Priority mapping
@@ -923,10 +984,9 @@ public class AMHSPayloadGeneratorService {
             // When per-recipient precedence is present, the receiving IUT must derive
             // its AMQP priority and amhs_ats_pri from the highest precedence. Do not
             // mask that behavior by copying the GUI/default ATS priority into the IPM.
-            if (atsPriority == null && recipientPrecedences.isEmpty()) {
-                atsPriority = effectivePriority;
-            }
-            if (atsPriority != null) {
+            // X.400 enum names such as NORMAL_PRIORITY are not valid ATS priority
+            // indicators. Set this attribute only when an ATS value is explicit.
+            if (atsPriority != null && !atsPriority.trim().isEmpty()) {
                 message.setStringparam(AMHS_att.ATS_S_PRIORITY_INDICATOR, atsPriority.trim());
             }
 

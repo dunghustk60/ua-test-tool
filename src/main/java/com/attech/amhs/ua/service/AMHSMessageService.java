@@ -304,6 +304,11 @@ public class AMHSMessageService {
     public String getLastSentFilingTime() {
         return lastSentFilingTime;
     }
+
+    /** Resolve dynamic AMHS values without modifying the supplied map. */
+    public Map<String, String> resolveDynamicAmhsDefaults(Map<String, String> amhsDefaults) {
+        return payloadGenerator.resolveDynamicAmhsDefaults(amhsDefaults);
+    }
     
     /**
      * Send an X.400 message with full AMHS configuration
@@ -321,6 +326,10 @@ public class AMHSMessageService {
     if (!isConnected) {
         throw new X400APIException("Not connected to X.400 system");
     }
+
+    // Resolve relative values into a private copy immediately before the
+    // message is classified and built. The caller's test-case map is unchanged.
+    amhsDefaults = resolveDynamicAmhsDefaults(amhsDefaults);
 
     if (isCtsw014ReceiptNotification(amhsDefaults)) {
         lastSentFilingTime = null;
@@ -568,6 +577,7 @@ public class AMHSMessageService {
                             if (prepareReceiptNotification) {
                                 String subjectMessageId = trimToNull(
                                         rm.getStringParam(X400_att.X400_S_IPM_IDENTIFIER));
+                                System.out.println("--------------------------------X400_S_IPM_IDENTIFIER = "+subjectMessageId);
                                 if (subjectMessageId == null) {
                                     subjectMessageId = trimToNull(rm.getMessageIdentifier());
                                 }
