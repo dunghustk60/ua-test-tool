@@ -913,6 +913,8 @@ public class AMHSMessageUI extends JFrame {
         defaults.remove("charset-reg-numbers");
         defaults.remove("probe");
         defaults.remove("rn");
+        defaults.remove("ftbp-file-name");
+        defaults.remove("ftbp-content");
         defaults.putAll(collectEditableAmhsFields(recipient, subject, content, priority));
 
         // A manual send always uses the current filing time. Removing both keys
@@ -1309,10 +1311,18 @@ public class AMHSMessageUI extends JFrame {
         fields.put("encoding", valueOrDefault((String) comboEncoding.getSelectedItem(), ""));
         fields.put("charset-reg-number", valueOrDefault((String) comboCharset.getSelectedItem(), ""));
         fields.put("content-type", valueOrDefault((String) comboContentType.getSelectedItem(), ""));
-        fields.put("body-part-type", valueOrDefault((String) comboBodyPartType.getSelectedItem(), "ia5-text"));
+        String selectedBodyPartType = valueOrDefault(
+                (String) comboBodyPartType.getSelectedItem(), "ia5-text");
+        fields.put("body-part-type", selectedBodyPartType);
         fields.put("payload-size", txtPayloadSize.getText().trim());
-        fields.put("ftbp-file-name", txtFTBPFileName.getText().trim());
-        fields.put("ftbp-content", txtFTBPContent.getText());
+        if (selectedBodyPartType.toLowerCase().contains("file-transfer")
+                || selectedBodyPartType.toLowerCase().contains("ftbp")) {
+            fields.put("ftbp-file-name", txtFTBPFileName.getText().trim());
+            fields.put("ftbp-content", txtFTBPContent.getText());
+        } else {
+            fields.remove("ftbp-file-name");
+            fields.remove("ftbp-content");
+        }
         fields.put("originator-report-request", valueOrDefault((String) comboDrReq.getSelectedItem(), "None"));
         fields.put("originating-mta-report-request",
                 toMtaReportValue((String) comboMtaReportReq.getSelectedItem()));
@@ -1570,8 +1580,15 @@ public class AMHSMessageUI extends JFrame {
         comboCharset.setSelectedItem(charset != null ? charset : "6");
         comboContentType.setSelectedItem(valueOrDefault(defaults.get("content-type"), "22"));
         txtPayloadSize.setText(valueOrDefault(defaults.get("payload-size"), ""));
-        txtFTBPFileName.setText(valueOrDefault(defaults.get("ftbp-file-name"), "attachment.bin"));
-        txtFTBPContent.setText(valueOrDefault(defaults.get("ftbp-content"), ""));
+        boolean hasFileTransferBodyPart = bodyPartType != null
+                && (bodyPartType.toLowerCase().contains("file-transfer")
+                        || bodyPartType.toLowerCase().contains("ftbp"));
+        txtFTBPFileName.setText(hasFileTransferBodyPart
+                ? valueOrDefault(defaults.get("ftbp-file-name"), "attachment.bin")
+                : "");
+        txtFTBPContent.setText(hasFileTransferBodyPart
+                ? valueOrDefault(defaults.get("ftbp-content"), "")
+                : "");
     }
 
     // ── Utility helpers ───────────────────────────────────────────────────

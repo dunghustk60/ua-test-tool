@@ -696,6 +696,32 @@ public class AMHSPayloadGeneratorService {
         return X400Msg.DR_Request.DR_NON_DELIVERY_REPORT;
     }
 
+    private Integer getMtaReportRequest(Map<String, String> amhsDefaults) throws X400APIException {
+        if (amhsDefaults == null) {
+            return null;
+        }
+        String configured = amhsDefaults.get("originating-mta-report-request");
+        if (configured == null || configured.trim().isEmpty()) {
+            return null;
+        }
+
+        String request = configured.trim().toLowerCase();
+        if (request.equals("no-report") || request.equals("none") || request.equals("0")) {
+            return 0;
+        }
+        if (request.equals("non-delivery-report") || request.equals("ndr") || request.equals("1")) {
+            return 1;
+        }
+        if (request.equals("delivery-report") || request.equals("dr") || request.equals("report")
+                || request.equals("both") || request.equals("2")) {
+            return 2;
+        }
+        if (request.equals("audited-report") || request.equals("3")) {
+            return 3;
+        }
+        throw new X400APIException("Invalid originating-mta-report-request: " + configured);
+    }
+
     /**
      * Apply AMHS fields excluding body part and filing-time.
      * Those two are handled directly in buildX400Message to ensure
@@ -817,27 +843,6 @@ public class AMHSPayloadGeneratorService {
             }
         }
 
-        // === RECEIPT NOTIFICATION (CTSW014-015) ===
-        String receiptMode = amhsDefaults.get("receipt-notification");
-        if (receiptMode != null && !receiptMode.trim().isEmpty()) {
-            try {
-                int notifValue;
-                if ("receipt-notification".equalsIgnoreCase(receiptMode.trim())
-                        || "rn".equalsIgnoreCase(receiptMode.trim())) {
-                    notifValue = 1; // 1 is typically RN
-                } else if ("non-receipt-notification".equalsIgnoreCase(receiptMode.trim())
-                        || "nrn".equalsIgnoreCase(receiptMode.trim())) {
-                    notifValue = 2; // 2 is typically NRN
-                } else {
-                    // Dung fix 10 August 2026
-                    notifValue = 0;
-                }
-                message.setIntParam(X400_att.X400_N_NOTIFICATION_REQUEST, notifValue);
-            } catch (Exception e) {
-                logger.warn("Failed to set receipt-notification: {}", e.getMessage());
-            }
-        }
-
         // GeneralText charset attribute 802 belongs to the body part. It is applied
         // once by addBodyPart; setting it on X400Msg creates an invalid native object.
         String implicitConversion = amhsDefaults.get("implicit-conversion");
@@ -848,51 +853,8 @@ public class AMHSPayloadGeneratorService {
 
         applyEncodedInformationTypes(message, amhsDefaults);
 
-        // === REPORT/NOTIFICATION CONFIGURATION ===
-        String originatorReport = amhsDefaults.get("originator-report-request");
-        if (originatorReport != null && !originatorReport.trim().isEmpty()) {
-            try {
-                int reportValue;
-                String req = originatorReport.trim().toLowerCase();
-                if (req.equals("non-delivery-report") || req.equals("ndr")) {
-                    reportValue = 1; // 1 = non-delivery-report
-                } else if (req.equals("delivery-report") || req.equals("dr")) {
-                    reportValue = 2; // 2 = report
-                } else if (req.equals("report") || req.equals("both") || req.equals("audited-report")) {
-                    reportValue = 2;
-                } else if (req.equals("no-report") || req.equals("none") || req.equals("0")) {
-                    reportValue = 0;
-                } else {
-                    reportValue = Integer.parseInt(req);
-                }
-                message.setIntParam(X400_att.X400_N_REPORT_REQUEST, reportValue);
-            } catch (Exception e) {
-                logger.warn("Failed to set originator-report-request: {}", e.getMessage());
-            }
-        }
-
-        String mtaReport = amhsDefaults.get("originating-mta-report-request");
-        if (mtaReport != null && !mtaReport.trim().isEmpty()) {
-            try {
-                int mtaReportValue;
-                String req = mtaReport.trim().toLowerCase();
-                if (req.equals("non-delivery-report") || req.equals("ndr")) {
-                    mtaReportValue = 1; // 1 = non-delivery-report
-                } else if (req.equals("delivery-report") || req.equals("dr") || req.equals("report")
-                        || req.equals("both")) {
-                    mtaReportValue = 2; // 2 = report
-                } else if (req.equals("audited-report") || req.equals("3")) {
-                    mtaReportValue = 3; // 3 = audited-report
-                } else if (req.equals("no-report") || req.equals("none") || req.equals("0")) {
-                    mtaReportValue = 0;
-                } else {
-                    mtaReportValue = Integer.parseInt(req);
-                }
-                message.setIntParam(X400_att.X400_N_MTA_REPORT_REQUEST, mtaReportValue);
-            } catch (Exception e) {
-                logger.warn("Failed to set originating-mta-report-request: {}", e.getMessage());
-            }
-        }
+        // DR, RN and originating-MTA requests are per-recipient attributes. They
+        // are applied while each recipient is created in buildX400Message().
     }
 
     /**
@@ -926,12 +888,17 @@ public class AMHSPayloadGeneratorService {
             // get delivery report
             X400Msg.DR_Request drRequest = getDrRequest(normalizedDefaults);
             int ipnRequest = getIpnRequest(normalizedDefaults);
+            Integer mtaReportRequest = getMtaReportRequest(normalizedDefaults);
             List<String> recipientPrecedences = resolvePerRecipientValues(normalizedDefaults,
                     "recipient-precedences", "precedence", toRecipients.size());
             List<String> recipientResponsibilities = resolvePerRecipientValues(normalizedDefaults,
                     "responsibility", null, toRecipients.size());
             for (int i = 0; i < toRecipients.size(); i++) {
                 Recip recipientObject = message.setTo(toRecipients.get(i), drRequest, ipnRequest);
+                if (mtaReportRequest != null) {
+                    addRecipientIntParam(recipientObject, X400_att.X400_N_MTA_REPORT_REQUEST,
+                            mtaReportRequest, "originating MTA report request", i);
+                }
                 if (!recipientPrecedences.isEmpty()) {
                     int precedence = parseRecipientPrecedence(recipientPrecedences.get(i), i);
                     addRecipientIntParam(recipientObject, X400_att.X400_N_PRECEDENCE,
@@ -959,6 +926,7 @@ public class AMHSPayloadGeneratorService {
             if ((effectivePriority == null || effectivePriority.trim().isEmpty()) && priority != null) {
                 effectivePriority = priority;
             }
+            int t = effectivePriority.length();
             X400_Priority priorityLevel = X400_Priority.NORMAL_PRIORITY; //getPriorityFromString(effectivePriority);
 
             message.setPriority(priorityLevel);
@@ -1151,22 +1119,6 @@ public class AMHSPayloadGeneratorService {
             }
         }
 
-        // === RECEIPT NOTIFICATION (CTSW014-015) ===
-        // X400_N_NOTIFICATION_REQUEST = 223 (confirmed via reflection)
-        // Bit flags: IPN_RECEIPT_NOTIFICATION=1, IPN_NON_RECEIPT_NOTIFICATION=2
-        String receiptMode = amhsDefaults.get("receipt-notification");
-        if (receiptMode != null && !receiptMode.trim().isEmpty()) {
-            try {
-                int notifValue = Integer.parseInt(receiptMode.trim());
-                message.setIntParam(X400_att.X400_N_NOTIFICATION_REQUEST, notifValue);
-                logger.debug("Set receipt-notification (X400_N_NOTIFICATION_REQUEST): {}", notifValue);
-            } catch (NumberFormatException e) {
-                logger.warn("Invalid receipt-notification value (expected int): {}", receiptMode);
-            } catch (Exception e) {
-                logger.warn("Failed to set receipt-notification: {}", e.getMessage());
-            }
-        }
-
         // === RESPONSIBILITY / NOTIFY-CONTROL-POSITION (CTSW020) ===
         // Responsibility is already handled in EXTENDED IPM ATTRIBUTES section above.
         // Notify-control-position: no dedicated constant exists; if the API ever
@@ -1226,36 +1178,6 @@ public class AMHSPayloadGeneratorService {
         }
 
         applyEncodedInformationTypes(message, amhsDefaults);
-
-        // === REPORT/NOTIFICATION CONFIGURATION ===
-
-        // Originator Report Request via X400_N_REPORT_REQUEST = 203
-        String originatorReport = amhsDefaults.get("originator-report-request");
-        if (originatorReport != null && !originatorReport.trim().isEmpty()) {
-            try {
-                int reportValue = Integer.parseInt(originatorReport.trim());
-                message.setIntParam(X400_att.X400_N_REPORT_REQUEST, reportValue);
-                logger.debug("Set originator-report-request (X400_N_REPORT_REQUEST): {}", reportValue);
-            } catch (NumberFormatException e) {
-                logger.warn("Invalid originator-report-request value: {}", originatorReport);
-            } catch (Exception e) {
-                logger.warn("Failed to set originator-report-request: {}", e.getMessage());
-            }
-        }
-
-        // Originating MTA Report Request via X400_N_MTA_REPORT_REQUEST = 202
-        String mtaReport = amhsDefaults.get("originating-mta-report-request");
-        if (mtaReport != null && !mtaReport.trim().isEmpty()) {
-            try {
-                int mtaReportValue = Integer.parseInt(mtaReport.trim());
-                message.setIntParam(X400_att.X400_N_MTA_REPORT_REQUEST, mtaReportValue);
-                logger.debug("Set originating-mta-report-request (X400_N_MTA_REPORT_REQUEST): {}", mtaReportValue);
-            } catch (NumberFormatException e) {
-                logger.warn("Invalid originating-mta-report-request value: {}", mtaReport);
-            } catch (Exception e) {
-                logger.warn("Failed to set originating-mta-report-request: {}", e.getMessage());
-            }
-        }
 
         // === CC/BCC RECIPIENTS ===
 
