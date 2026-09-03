@@ -23,6 +23,7 @@ import java.util.Map;
 import java.util.Arrays;
 import java.util.List;
 import java.util.ArrayList;
+import java.util.Locale;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import org.slf4j.Logger;
@@ -108,7 +109,7 @@ public class AMHSPayloadGeneratorService {
         EMPTY_DEFAULTS.put("repertoire", "");
         EMPTY_DEFAULTS.put("content-type", "");
         EMPTY_DEFAULTS.put("implicit-conversion", "");
-        
+
         // Header empty flag
         EMPTY_DEFAULTS.put("header-empty", "");
 
@@ -214,13 +215,20 @@ public class AMHSPayloadGeneratorService {
 
     static {
         // id-cs-eit-authority values (STANAG 4406 / ACP 142)
-        EIT_OID_MAP.put("id-cs-eit-authority-1",   "2.16.840.1.101.2.1.22.1");  // ia5-text
-        EIT_OID_MAP.put("id-cs-eit-authority-2",   "2.16.840.1.101.2.1.22.2");  // general-text
-        EIT_OID_MAP.put("id-cs-eit-authority-3",   "2.16.840.1.101.2.1.22.3");  // Invalid (for CTSW016)
-        EIT_OID_MAP.put("id-cs-eit-authority-4",   "2.16.840.1.101.2.1.22.4");  // Invalid (for CTSW016)
-        EIT_OID_MAP.put("id-cs-eit-authority-6",   "2.16.840.1.101.2.1.22.6");  // FTBP
-        EIT_OID_MAP.put("id-cs-eit-authority-7",   "2.16.840.1.101.2.1.22.7");  // Invalid (for CTSW016)
-        EIT_OID_MAP.put("id-cs-eit-authority-100", "2.16.840.1.101.2.1.22.100"); // proprietary
+//        EIT_OID_MAP.put("id-cs-eit-authority-1",   "2.16.840.1.101.2.1.22.1");  // ia5-text
+//        EIT_OID_MAP.put("id-cs-eit-authority-2",   "2.16.840.1.101.2.1.22.2");  // general-text
+//        EIT_OID_MAP.put("id-cs-eit-authority-3",   "2.16.840.1.101.2.1.22.3");  // Invalid (for CTSW016)
+//        EIT_OID_MAP.put("id-cs-eit-authority-4",   "2.16.840.1.101.2.1.22.4");  // Invalid (for CTSW016)
+//        EIT_OID_MAP.put("id-cs-eit-authority-6",   "2.16.840.1.101.2.1.22.6");  // FTBP
+//        EIT_OID_MAP.put("id-cs-eit-authority-7",   "2.16.840.1.101.2.1.22.7");  // Invalid (for CTSW016)
+//        EIT_OID_MAP.put("id-cs-eit-authority-100", "2.16.840.1.101.2.1.22.100"); // proprietary
+        EIT_OID_MAP.put("id-cs-eit-authority-1",   "1.0.10021.7.1.0.1");  // ia5-text
+        EIT_OID_MAP.put("id-cs-eit-authority-2",   "1.0.10021.7.1.0.2");  // general-text
+        EIT_OID_MAP.put("id-cs-eit-authority-3",   "1.0.10021.7.1.0.3");  // Invalid (for CTSW016)
+        EIT_OID_MAP.put("id-cs-eit-authority-4",   "1.0.10021.7.1.0.4");  // Invalid (for CTSW016)
+        EIT_OID_MAP.put("id-cs-eit-authority-6",   "1.0.10021.7.1.0.6");  // FTBP
+        EIT_OID_MAP.put("id-cs-eit-authority-7",   "1.0.10021.7.1.0.7");  // Invalid (for CTSW016)
+        EIT_OID_MAP.put("id-cs-eit-authority-100", "1.0.10021.7.1.0.100"); // proprietary
         // File-transfer EIT (id-eit-file-transfer 0 per EUR Doc 047)
         EIT_OID_MAP.put("id-eit-file-transfer-0",  "2.16.840.1.101.2.1.22.6");  // maps to FTBP
         // The Isode string API requires symbolic EIT names. "undefined" is a
@@ -298,7 +306,7 @@ public class AMHSPayloadGeneratorService {
     /**
      * Get default AMHS fields for a test subcase
      * If subcase has defaults, use them; otherwise use empty defaults
-     * 
+     *
      * @param subcase TestSubcase with potential default values
      * @return Map of field names to values
      */
@@ -314,7 +322,7 @@ public class AMHSPayloadGeneratorService {
 
     /**
      * Get empty defaults for first boot or new message
-     * 
+     *
      * @return Map of empty default fields
      */
     public Map<String, String> getEmptyDefaults() {
@@ -859,7 +867,7 @@ public class AMHSPayloadGeneratorService {
 
     /**
      * Build X.400 message from parameters with full AMHS field support
-     * 
+     *
      * @param session      P3BindSession
      * @param recipient    Recipient address
      * @param subject      Message subject
@@ -959,7 +967,11 @@ public class AMHSPayloadGeneratorService {
             }
 
             String extended = normalizedDefaults != null ? normalizedDefaults.get("extended") : null;
-            message.setIntParam(AMHS_att.ATS_N_EXTENDED, "true".equalsIgnoreCase(extended) ? 1 : 0);
+            boolean isExtended = extended != null && "true".equalsIgnoreCase(extended.trim());
+            message.setIntParam(AMHS_att.ATS_N_EXTENDED, isExtended ? 1 : 0);
+            if (isExtended) {
+                message.setStringparam(X400_att.X400_S_PRECEDENCE_POLICY_ID, "1.3.27.8.0.0");
+            }
 
             int contentType = parseNonNegativeIntOrDefault(normalizedDefaults.get("content-type"), 22);
             message.setIntParam(X400_att.X400_N_CONTENT_TYPE, contentType);
@@ -987,7 +999,7 @@ public class AMHSPayloadGeneratorService {
 
     /**
      * Build X.400 message from TestSubcase with all configured AMHS fields
-     * 
+     *
      * @param session P3BindSession
      * @param subcase TestSubcase with complete AMHS configuration
      * @return Built X.400 message
@@ -1005,7 +1017,7 @@ public class AMHSPayloadGeneratorService {
 
     /**
      * Build probe X400 message from TestSubcase with all configured AMHS fields
-     * 
+     *
      * @param session P3BindSession
      * @param subcase TestSubcase with complete AMHS configuration
      * @return Built X.400 probe message
@@ -1027,7 +1039,7 @@ public class AMHSPayloadGeneratorService {
     /**
      * Apply AMHS-specific fields to X.400 message
      * Full implementation per ICAO Doc 020 and EUR Doc 047 requirements
-     * 
+     *
      * @param message      X400Msg to configure
      * @param content      Message content
      * @param amhsDefaults Map of AMHS field names to values
@@ -1158,7 +1170,7 @@ public class AMHSPayloadGeneratorService {
         // addBodyPart. It must not be added to the parent message object.
         String conversionProhibited = amhsDefaults.get("conversion-with-loss-prohibited");
         String implicitConversion = amhsDefaults.get("implicit-conversion");
-        
+
         // implicit-conversion-prohibited (CTSW019)
         if (implicitConversion != null && !implicitConversion.trim().isEmpty()) {
             try {
@@ -1268,7 +1280,7 @@ public class AMHSPayloadGeneratorService {
 
     /**
      * Check if a priority string is an ATS priority code (KK, GG, FF, DD, SS)
-     * 
+     *
      * @param priority Priority string to check
      * @return true if it's an ATS priority code
      */
@@ -1374,11 +1386,21 @@ public class AMHSPayloadGeneratorService {
             if (repertoire == null && amhsDefaults != null) {
                 repertoire = amhsDefaults.get("charset-repertoire");
             }
-            if (repertoire != null && !repertoire.trim().isEmpty() && !"ia5".equalsIgnoreCase(repertoire.trim())) {
-                try {
-                    ia5.setStringParam(803, repertoire.trim());
-                } catch (Exception e) {
-                    logger.debug("Could not set repertoire on BodypartIA5Text: {}", e.getMessage());
+            if (repertoire != null && !repertoire.trim().isEmpty()) {
+                String normalizedRepertoire = repertoire.trim().toLowerCase(Locale.ROOT);
+                if (!"ia5".equals(normalizedRepertoire) && !"5".equals(normalizedRepertoire)) {
+                    if ("ita2".equals(normalizedRepertoire) || "2".equals(normalizedRepertoire)) {
+                        // The installed Isode high-level API has no setRepertoire(int)
+                        // method and its attribute table exposes no IA5 repertoire
+                        // attribute. Attribute 803 must not be used here: it is
+                        // X400_N_FTBP_ENCODING and belongs only to file-transfer BPs.
+                        throw new X400APIException(
+                                "IA5 repertoire ita2(2) requires an Isode SDK exposing "
+                                        + "BodypartIA5Text.setRepertoire(int); the installed SDK supports "
+                                        + "only the default ia5(5) repertoire");
+                    }
+                    throw new X400APIException("Invalid IA5 repertoire: " + repertoire
+                            + ". Expected ita2(2) or ia5(5)");
                 }
             }
             message.addBodypart(ia5);
