@@ -21,11 +21,13 @@ import org.slf4j.LoggerFactory;
 
 import java.awt.*;
 import java.io.File;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import javax.swing.*;
 import javax.swing.border.EmptyBorder;
 import javax.swing.border.TitledBorder;
+import javax.swing.table.DefaultTableModel;
 
 /**
  * Main UI for AMHS X.400 Message Tool.
@@ -89,6 +91,18 @@ public class AMHSMessageUI extends JFrame {
     private JTextField txtFTBPFileName; // FTBP File Name
     private JTextArea txtFTBPContent; // FTBP Content
     private JComboBox<AMHSMessageService.ReceiptNotificationSubject> comboCtsw014Subject;
+    private JComboBox<String> comboReceiveAction;
+    private JTextField txtReceiveReason;
+    private JTable tablePendingNotifications;
+    private DefaultTableModel pendingNotificationTableModel;
+    private final List<AMHSMessageService.PendingNotificationChoice> pendingNotificationRows = new ArrayList<>();
+    private JButton btnSendPendingRn;
+    private JButton btnSendPendingNrn;
+    private JButton btnDiscardPendingNotification;
+    private JButton btnReceive;
+    private final List<AMHSMessageService.PendingNotificationChoice> pendingChoiceUpdateBuffer = new ArrayList<>();
+    private boolean pendingChoiceFlushScheduled;
+    private boolean inspectingPendingNotifications;
     private boolean updatingCtsw014SubjectSelector;
 
     // ── Constructor ───────────────────────────────────────────────────────
@@ -561,8 +575,82 @@ public class AMHSMessageUI extends JFrame {
         });
         panel.add(comboCtsw014Subject, gbc);
 
-        // Buttons
+        // Response returned after receiving the next mailbox message
+        gbc.gridx = 0;
         gbc.gridy = 13;
+        gbc.gridwidth = 1;
+        gbc.weightx = 0;
+        panel.add(new JLabel("Receive Response:"), gbc);
+        gbc.gridx = 1;
+        gbc.weightx = 0.5;
+        comboReceiveAction = new JComboBox<>(new String[] {
+                "Auto", "Accept", "Choose RN/NRN", "NDR"
+        });
+        comboReceiveAction.setToolTipText("Choose RN/NRN stages requested notifications for selection below");
+        panel.add(comboReceiveAction, gbc);
+
+        gbc.gridx = 2;
+        gbc.weightx = 0;
+        panel.add(new JLabel("Response Reason:"), gbc);
+        gbc.gridx = 3;
+        gbc.weightx = 0.5;
+        txtReceiveReason = new JTextField("", 8);
+        txtReceiveReason.setToolTipText("NRN reason (default 0) or NDR reason (default 1)");
+        panel.add(txtReceiveReason, gbc);
+
+        // Received IPMs awaiting an operator-selected RN or NRN.
+        gbc.gridy = 14;
+        gbc.gridx = 0;
+        gbc.gridwidth = 1;
+        gbc.weightx = 0;
+        gbc.weighty = 0;
+        gbc.fill = GridBagConstraints.BOTH;
+        panel.add(new JLabel("Pending RN/NRN:"), gbc);
+
+        pendingNotificationTableModel = new DefaultTableModel(
+                new Object[] { "Allowed", "Originator", "Subject", "Text Preview" }, 0) {
+            @Override
+            public boolean isCellEditable(int row, int column) {
+                return false;
+            }
+        };
+        tablePendingNotifications = new JTable(pendingNotificationTableModel);
+        tablePendingNotifications.setSelectionMode(ListSelectionModel.SINGLE_SELECTION);
+        tablePendingNotifications.getSelectionModel().addListSelectionListener(
+                e -> updatePendingNotificationButtons());
+        JScrollPane pendingScrollPane = new JScrollPane(tablePendingNotifications);
+        pendingScrollPane.setPreferredSize(new Dimension(650, 90));
+        gbc.gridx = 1;
+        gbc.gridwidth = 3;
+        gbc.weightx = 1.0;
+        gbc.weighty = 0.4;
+        panel.add(pendingScrollPane, gbc);
+
+        gbc.gridy = 15;
+        gbc.gridx = 1;
+        gbc.gridwidth = 1;
+        gbc.weightx = 0;
+        gbc.weighty = 0;
+        gbc.fill = GridBagConstraints.HORIZONTAL;
+        btnSendPendingRn = new JButton("Send RN");
+        btnSendPendingRn.setEnabled(false);
+        btnSendPendingRn.addActionListener(e -> sendSelectedPendingNotification(true));
+        panel.add(btnSendPendingRn, gbc);
+
+        gbc.gridx = 2;
+        btnSendPendingNrn = new JButton("Send NRN");
+        btnSendPendingNrn.setEnabled(false);
+        btnSendPendingNrn.addActionListener(e -> sendSelectedPendingNotification(false));
+        panel.add(btnSendPendingNrn, gbc);
+
+        gbc.gridx = 3;
+        btnDiscardPendingNotification = new JButton("Discard");
+        btnDiscardPendingNotification.setEnabled(false);
+        btnDiscardPendingNotification.addActionListener(e -> discardSelectedPendingNotification());
+        panel.add(btnDiscardPendingNotification, gbc);
+
+        // Main operation buttons
+        gbc.gridy = 16;
         gbc.gridwidth = 1;
         gbc.weightx = 0;
         gbc.weighty = 0;
@@ -575,7 +663,7 @@ public class AMHSMessageUI extends JFrame {
         panel.add(btnSend, gbc);
 
         gbc.gridx = 1;
-        JButton btnReceive = new JButton("Receive Messages");
+        btnReceive = new JButton("Receive Messages");
         btnReceive.addActionListener(e -> receiveMessages());
         panel.add(btnReceive, gbc);
 
@@ -865,6 +953,7 @@ public class AMHSMessageUI extends JFrame {
 
     private void disconnect() {
         messageService.disconnect();
+        refreshPendingNotificationTable();
         lblConnectionStatus.setText("Status: Disconnected");
         lblConnectionStatus.setForeground(Color.RED);
         appendOutput("Disconnected from X.400 system");
@@ -961,52 +1050,279 @@ public class AMHSMessageUI extends JFrame {
             appendOutput("Error: Not connected. Please connect first.");
             return;
         }
+        if (btnReceive != null) {
+            btnReceive.setEnabled(false);
+        }
         appendOutput("Receiving messages…");
 
         TestSubcase selectedSubcase = getSelectedSubcase();
         final Map<String, String> receiveDefaults = selectedSubcase != null
                 ? new java.util.HashMap<>(selectedSubcase.getAmhsDefaults())
-                : java.util.Collections.emptyMap();
+                : new java.util.HashMap<>();
+        String receiveAction = toReceiveActionValue(
+                comboReceiveAction != null ? (String) comboReceiveAction.getSelectedItem() : null);
+        receiveDefaults.put("receive-action", receiveAction);
+        String responseReason = txtReceiveReason != null ? txtReceiveReason.getText().trim() : "";
+        if ("return-ndr".equals(receiveAction)) {
+            receiveDefaults.put("non-delivery-reason", responseReason);
+        }
         final boolean receivingCtsw014Subjects = "rn".equalsIgnoreCase(receiveDefaults.get("message-type"))
                 && receiveDefaults.containsKey("subject-message-priority");
+        final boolean stagingInteractiveResponses = "stage-ipn".equals(receiveAction);
         if (receivingCtsw014Subjects) {
             clearCtsw014SubjectSelector(true);
+        }
+        if (stagingInteractiveResponses && pendingNotificationRows.isEmpty()) {
+            pendingNotificationTableModel.setRowCount(0);
+        }
+        if (stagingInteractiveResponses) {
+            inspectingPendingNotifications = true;
+            setPendingNotificationButtonsEnabled(false);
+            synchronized (pendingChoiceUpdateBuffer) {
+                pendingChoiceUpdateBuffer.clear();
+            }
         }
 
         new Thread(() -> {
             try {
-                List<AMHSMessageService.MessageSummary> all = messageService.getMailboxSummary();
-                if (all.isEmpty()) {
-                    SwingUtilities.invokeLater(() -> appendOutput("No messages found."));
-                    return;
+                List<AMHSMessageService.MessageSummary> msgs;
+                if (stagingInteractiveResponses) {
+                    msgs = messageService.receiveMessages(Integer.MAX_VALUE, receiveDefaults,
+                            this::enqueuePendingNotificationRow);
+                } else {
+                    List<AMHSMessageService.MessageSummary> all = messageService.getMailboxSummary();
+                    if (all.isEmpty()) {
+                        SwingUtilities.invokeLater(() -> {
+                            btnReceive.setEnabled(true);
+                            appendOutput("No messages found.");
+                        });
+                        return;
+                    }
+                    msgs = messageService.receiveMessages(all.size(), receiveDefaults);
                 }
-                List<AMHSMessageService.MessageSummary> msgs = messageService.receiveMessages(all.size(), receiveDefaults);
                 SwingUtilities.invokeLater(() -> {
+                    inspectingPendingNotifications = false;
+                    btnReceive.setEnabled(true);
+                    if (stagingInteractiveResponses) {
+                        updatePendingNotificationButtons();
+                    } else {
+                        refreshPendingNotificationTable();
+                    }
                     if (receivingCtsw014Subjects) {
                         refreshCtsw014SubjectSelector(
                                 receiveDefaults.get("subject-message-priority"), null);
                     }
-                    appendOutput("Received " + msgs.size() + " message(s):");
-                    for (AMHSMessageService.MessageSummary m : msgs) {
-                        appendOutput("From: " + m.getSender() + "  Subject: " + m.getSubject()
-                                + (m.getReportType() != null ? "  [" + m.getReportType() + " Report]" : ""));
-                        if (m.getReportDetails() != null && m.getReportDetails().startsWith("RN staged")) {
-                            appendOutput(m.getReportDetails());
+                    appendOutput((stagingInteractiveResponses ? "Inspected " : "Received ")
+                            + msgs.size() + " message(s):");
+                    if (!stagingInteractiveResponses) {
+                        if (markingPanel != null) {
+                            markingPanel.beginBatchUpdate();
                         }
-                        if (m.getReportDetails() != null && m.getReportDetails().startsWith("CTSW015")) {
-                            appendOutput(m.getReportDetails());
+                        try {
+                            for (AMHSMessageService.MessageSummary m : msgs) {
+                                appendOutput("From: " + m.getSender() + "  Subject: " + m.getSubject()
+                                        + (m.getReportType() != null ? "  [" + m.getReportType() + " Report]" : ""));
+                                if (m.getReportDetails() != null && m.getReportDetails().startsWith("RN staged")) {
+                                    appendOutput(m.getReportDetails());
+                                }
+                                if (m.getReportDetails() != null && m.getReportDetails().startsWith("CTSW015")) {
+                                    appendOutput(m.getReportDetails());
+                                }
+                                addMessageToMarkingPanel(m.getSender(), txtUserOrAddress.getText().trim(),
+                                        m.getSubject(), m.getContent(), null, true, null, true, null,
+                                        m.getReportType(), m.getReportDetails());
+                            }
+                        } finally {
+                            if (markingPanel != null) {
+                                markingPanel.endBatchUpdate();
+                            }
                         }
-                        addMessageToMarkingPanel(m.getSender(), txtUserOrAddress.getText().trim(), m.getSubject(),
-                                m.getContent(), null, true, null, true, null,
-                                m.getReportType(), m.getReportDetails());
-                        // Logging to DescriptionPanel has been removed per user request.
                     }
                 });
             } catch (Throwable t) {
-                SwingUtilities.invokeLater(() -> appendOutput(
-                        "Failed to receive messages: " + t.getMessage()));
+                SwingUtilities.invokeLater(() -> {
+                    inspectingPendingNotifications = false;
+                    btnReceive.setEnabled(true);
+                    refreshPendingNotificationTable();
+                    appendOutput("Failed to receive messages: " + t.getMessage());
+                });
             }
         }).start();
+    }
+
+    private void enqueuePendingNotificationRow(AMHSMessageService.PendingNotificationChoice choice) {
+        boolean scheduleFlush = false;
+        synchronized (pendingChoiceUpdateBuffer) {
+            pendingChoiceUpdateBuffer.add(choice);
+            if (!pendingChoiceFlushScheduled) {
+                pendingChoiceFlushScheduled = true;
+                scheduleFlush = true;
+            }
+        }
+        if (scheduleFlush) {
+            SwingUtilities.invokeLater(this::flushPendingNotificationRows);
+        }
+    }
+
+    private void flushPendingNotificationRows() {
+        List<AMHSMessageService.PendingNotificationChoice> batch;
+        synchronized (pendingChoiceUpdateBuffer) {
+            batch = new ArrayList<>(pendingChoiceUpdateBuffer);
+            pendingChoiceUpdateBuffer.clear();
+            pendingChoiceFlushScheduled = false;
+        }
+        for (AMHSMessageService.PendingNotificationChoice choice : batch) {
+            addPendingNotificationRow(choice);
+        }
+        if (!batch.isEmpty()) {
+            appendOutput("Added " + batch.size() + " pending RN/NRN message(s) to the table.");
+        }
+    }
+
+    private void addPendingNotificationRow(AMHSMessageService.PendingNotificationChoice choice) {
+        for (AMHSMessageService.PendingNotificationChoice existing : pendingNotificationRows) {
+            if (existing.getId() == choice.getId()) return;
+        }
+        pendingNotificationRows.add(choice);
+        pendingNotificationTableModel.addRow(new Object[] {
+                choice.getAllowedResponses(), choice.getOriginator(), choice.getSubject(),
+                choice.getTextPreview()
+        });
+        if (tablePendingNotifications.getSelectedRow() < 0) {
+            int row = pendingNotificationTableModel.getRowCount() - 1;
+            tablePendingNotifications.setRowSelectionInterval(row, row);
+        }
+        updatePendingNotificationButtons();
+    }
+
+    private void refreshPendingNotificationTable() {
+        Long selectedId = null;
+        AMHSMessageService.PendingNotificationChoice selected = getSelectedPendingNotification();
+        if (selected != null) selectedId = selected.getId();
+
+        pendingNotificationRows.clear();
+        pendingNotificationRows.addAll(messageService.getPendingNotificationChoices());
+        pendingNotificationTableModel.setRowCount(0);
+        int selectedRow = -1;
+        for (int i = 0; i < pendingNotificationRows.size(); i++) {
+            AMHSMessageService.PendingNotificationChoice choice = pendingNotificationRows.get(i);
+            pendingNotificationTableModel.addRow(new Object[] {
+                    choice.getAllowedResponses(), choice.getOriginator(), choice.getSubject(),
+                    choice.getTextPreview()
+            });
+            if (selectedId != null && selectedId.longValue() == choice.getId()) {
+                selectedRow = i;
+            }
+        }
+        if (selectedRow >= 0) {
+            tablePendingNotifications.setRowSelectionInterval(selectedRow, selectedRow);
+        }
+        updatePendingNotificationButtons();
+    }
+
+    private AMHSMessageService.PendingNotificationChoice getSelectedPendingNotification() {
+        if (tablePendingNotifications == null) return null;
+        int viewRow = tablePendingNotifications.getSelectedRow();
+        if (viewRow < 0) return null;
+        int modelRow = tablePendingNotifications.convertRowIndexToModel(viewRow);
+        return modelRow >= 0 && modelRow < pendingNotificationRows.size()
+                ? pendingNotificationRows.get(modelRow) : null;
+    }
+
+    private void updatePendingNotificationButtons() {
+        AMHSMessageService.PendingNotificationChoice selected = getSelectedPendingNotification();
+        if (btnSendPendingRn != null) {
+            btnSendPendingRn.setEnabled(!inspectingPendingNotifications
+                    && selected != null && selected.canSendRn());
+        }
+        if (btnSendPendingNrn != null) {
+            btnSendPendingNrn.setEnabled(!inspectingPendingNotifications
+                    && selected != null && selected.canSendNrn());
+        }
+        if (btnDiscardPendingNotification != null) {
+            btnDiscardPendingNotification.setEnabled(!inspectingPendingNotifications && selected != null);
+        }
+    }
+
+    private void sendSelectedPendingNotification(boolean sendRn) {
+        AMHSMessageService.PendingNotificationChoice selected = getSelectedPendingNotification();
+        if (selected == null) {
+            appendOutput("Select a received message first.");
+            return;
+        }
+
+        final int nrnReason;
+        try {
+            nrnReason = sendRn ? 0 : parseNrnReason(txtReceiveReason.getText());
+        } catch (IllegalArgumentException ex) {
+            appendOutput("Cannot send NRN: " + ex.getMessage());
+            return;
+        }
+        setPendingNotificationButtonsEnabled(false);
+        String responseName = sendRn ? "RN" : "NRN";
+        appendOutput("Sending " + responseName + " for IPM " + selected.getIpmId() + "...");
+        new Thread(() -> {
+            try {
+                String messageId = messageService.sendPendingNotification(
+                        selected.getId(), sendRn, nrnReason);
+                SwingUtilities.invokeLater(() -> {
+                    appendOutput(responseName + " sent successfully. Message ID: " + messageId);
+                    refreshPendingNotificationTable();
+                });
+            } catch (Throwable t) {
+                SwingUtilities.invokeLater(() -> {
+                    appendOutput("Failed to send " + responseName + ": " + t.getMessage());
+                    updatePendingNotificationButtons();
+                });
+            }
+        }).start();
+    }
+
+    private int parseNrnReason(String value) {
+        String reason = value != null ? value.trim() : "";
+        if (reason.isEmpty() || "ipm-discarded".equalsIgnoreCase(reason)) return 0;
+        if ("ipm-auto-forwarded".equalsIgnoreCase(reason)) return 1;
+        try {
+            int parsed = Integer.parseInt(reason);
+            if (parsed == 0 || parsed == 1) return parsed;
+        } catch (NumberFormatException ignored) {
+            // Report the same concise validation message for text and numeric input.
+        }
+        throw new IllegalArgumentException(
+                "reason must be 0 (ipm-discarded) or 1 (ipm-auto-forwarded).");
+    }
+
+    private void discardSelectedPendingNotification() {
+        AMHSMessageService.PendingNotificationChoice selected = getSelectedPendingNotification();
+        if (selected == null) {
+            appendOutput("Select a received message first.");
+            return;
+        }
+        setPendingNotificationButtonsEnabled(false);
+        new Thread(() -> {
+            try {
+                messageService.discardPendingNotification(selected.getId());
+                SwingUtilities.invokeLater(() -> {
+                    appendOutput("Discarded staged responses for IPM " + selected.getIpmId() + ".");
+                    refreshPendingNotificationTable();
+                });
+            } catch (Throwable t) {
+                SwingUtilities.invokeLater(() -> {
+                    appendOutput("Failed to discard staged responses: " + t.getMessage());
+                    updatePendingNotificationButtons();
+                });
+            }
+        }).start();
+    }
+
+    private void setPendingNotificationButtonsEnabled(boolean enabled) {
+        if (!enabled) {
+            btnSendPendingRn.setEnabled(false);
+            btnSendPendingNrn.setEnabled(false);
+            btnDiscardPendingNotification.setEnabled(false);
+        } else {
+            updatePendingNotificationButtons();
+        }
     }
 
     private void getMailboxSummary() {
@@ -1059,6 +1375,8 @@ public class AMHSMessageUI extends JFrame {
         txtPayloadSize.setText("");
         txtFTBPFileName.setText("attachment.bin");
         txtFTBPContent.setText("");
+        comboReceiveAction.setSelectedItem("Auto");
+        txtReceiveReason.setText("");
     }
 
     private void handleLoadDefaultsForSubcase() {
@@ -1539,6 +1857,33 @@ public class AMHSMessageUI extends JFrame {
         return "No Report";
     }
 
+    private String toReceiveActionValue(String selection) {
+        if (selection == null) {
+            return "auto";
+        }
+        String normalized = selection.trim().toLowerCase();
+        if ("choose rn/nrn".equals(normalized) || "stage-ipn".equals(normalized)
+                || "rn".equals(normalized) || "return-rn".equals(normalized)
+                || "nrn".equals(normalized) || "return-nrn".equals(normalized)) {
+            return "stage-ipn";
+        }
+        if ("ndr".equals(normalized) || "return-ndr".equals(normalized)) {
+            return "return-ndr";
+        }
+        if ("accept".equals(normalized) || "none".equals(normalized)) {
+            return "accept";
+        }
+        return "auto";
+    }
+
+    private String toReceiveActionSelection(String value) {
+        String canonical = toReceiveActionValue(value);
+        if ("stage-ipn".equals(canonical)) return "Choose RN/NRN";
+        if ("return-ndr".equals(canonical)) return "NDR";
+        if ("accept".equals(canonical)) return "Accept";
+        return "Auto";
+    }
+
     private void applyDefaults(Map<String, String> defaults) {
         String recipient = firstNonEmptyValue(defaults, "primary-recipients", "recipient");
         txtRecipient.setText(recipient != null ? recipient : "");
@@ -1565,6 +1910,13 @@ public class AMHSMessageUI extends JFrame {
         comboDrReq.setSelectedItem(toDrSelection(defaults.get("originator-report-request")));
         comboRnReq.setSelectedItem(toRnSelection(defaults.get("receipt-notification")));
         comboMtaReportReq.setSelectedItem(toMtaSelection(defaults.get("originating-mta-report-request")));
+        String receiveAction = firstNonEmptyValue(defaults, "receive-action");
+        comboReceiveAction.setSelectedItem(toReceiveActionSelection(receiveAction));
+        String receiveActionValue = toReceiveActionValue(receiveAction);
+        txtReceiveReason.setText("stage-ipn".equals(receiveActionValue)
+                ? valueOrDefault(defaults.get("non-receipt-reason"), "")
+                : "return-ndr".equals(receiveActionValue)
+                        ? valueOrDefault(defaults.get("non-delivery-reason"), "") : "");
 
         String bodyPartType = firstNonEmptyValue(defaults, "body-part-types", "body-part-type");
         comboBodyPartType.setSelectedItem(bodyPartType != null ? bodyPartType : "ia5-text");

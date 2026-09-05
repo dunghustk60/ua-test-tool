@@ -29,6 +29,7 @@ public class TestMarkingPanel extends JPanel {
     private List<MessageLog> allMessages;
     private String currentUserAddress;
     private SimpleDateFormat dateFormat;
+    private int batchUpdateDepth;
 
     // Reports panel (top)
     private JTextArea txtReports;
@@ -148,7 +149,24 @@ public class TestMarkingPanel extends JPanel {
     public void addMessage(MessageLog message, boolean isReceived) {
         message.setIsReceived(isReceived);
         allMessages.add(message);
-        refreshDisplay();
+        if (batchUpdateDepth == 0) {
+            refreshDisplay();
+        }
+    }
+
+    /** Defer display rebuilding while multiple messages are added. */
+    public void beginBatchUpdate() {
+        batchUpdateDepth++;
+    }
+
+    /** Complete a batch and rebuild all message displays once. */
+    public void endBatchUpdate() {
+        if (batchUpdateDepth > 0) {
+            batchUpdateDepth--;
+        }
+        if (batchUpdateDepth == 0) {
+            refreshDisplay();
+        }
     }
 
     /**
