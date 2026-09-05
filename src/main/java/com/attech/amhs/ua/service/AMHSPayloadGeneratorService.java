@@ -759,18 +759,6 @@ public class AMHSPayloadGeneratorService {
             }
         }
 
-        // ATS Header raw injection (best-effort mapping to optional heading info)
-        String atsHeader = amhsDefaults.get("ats-header");
-        if (atsHeader != null && !atsHeader.trim().isEmpty()) {
-            try {
-                String currentOhi = amhsDefaults.getOrDefault("optional-heading-info", "");
-                String combinedHeader = currentOhi.isEmpty() ? atsHeader.trim() : currentOhi + " " + atsHeader.trim();
-                message.setStringparam(AMHS_att.ATS_S_OPTIONAL_HEADING_INFO, combinedHeader);
-            } catch (Exception e) {
-                logger.warn("Failed to map ats-header to ATS_S_OPTIONAL_HEADING_INFO: {}", e.getMessage());
-            }
-        }
-
         // Originator Reference
         String originatorRef = amhsDefaults.get("originator-reference");
         if (originatorRef != null && !originatorRef.trim().isEmpty()) {
@@ -934,48 +922,53 @@ public class AMHSPayloadGeneratorService {
             if ((effectivePriority == null || effectivePriority.trim().isEmpty()) && priority != null) {
                 effectivePriority = priority;
             }
-            int t = effectivePriority.length();
             X400_Priority priorityLevel = X400_Priority.NORMAL_PRIORITY; //getPriorityFromString(effectivePriority);
 
             message.setPriority(priorityLevel);
 
             // ── BODY PART(S) ──────────────────────────────────────────────────
             String safeContent = resolveBodyContent(normalizedDefaults, content);
+            boolean rawAtsHeader = isRawAtsHeaderMode(normalizedDefaults);
+            String encodedBodyContent = rawAtsHeader
+                    ? buildRawAtsBody(normalizedDefaults, safeContent)
+                    : safeContent;
             String bodyPartTypeSpec = firstNonEmpty(normalizedDefaults, "body-part-types", "body-part-type");
-            addBodyParts(message, bodyPartTypeSpec, safeContent, normalizedDefaults);
+            addBodyParts(message, bodyPartTypeSpec, encodedBodyContent, normalizedDefaults);
 
             // ── FILING TIME (set exactly once, always) ───────────────────────
-            String ft;
-            if (filingTime != null && !filingTime.trim().isEmpty()) {
-                ft = filingTime.trim();
-            } else {
-                ft = resolveFilingTime(normalizedDefaults);
-            }
-            message.setStringparam(AMHS_att.ATS_S_FILING_TIME, ft);
-            logger.debug("Set filing-time: {}", ft);
+            if (!rawAtsHeader) {
+                String ft;
+                if (filingTime != null && !filingTime.trim().isEmpty()) {
+                    ft = filingTime.trim();
+                } else {
+                    ft = resolveFilingTime(normalizedDefaults);
+                }
+                message.setStringparam(AMHS_att.ATS_S_FILING_TIME, ft);
+                logger.debug("Set filing-time: {}", printableAtsValue(ft));
 
-            String atsPriority = normalizedDefaults.containsKey("ats-priority")
-                    ? normalizedDefaults.get("ats-priority")
-                    : firstNonEmpty(normalizedDefaults, "priority-indicator", "subject-message-priority");
-            // When per-recipient precedence is present, the receiving IUT must derive
-            // its AMQP priority and amhs_ats_pri from the highest precedence. Do not
-            // mask that behavior by copying the GUI/default ATS priority into the IPM.
-            // X.400 enum names such as NORMAL_PRIORITY are not valid ATS priority
-            // indicators. Set this attribute only when an ATS value is explicit.
-            if (atsPriority != null && !atsPriority.trim().isEmpty()) {
-                message.setStringparam(AMHS_att.ATS_S_PRIORITY_INDICATOR, atsPriority.trim());
+                String atsPriority = normalizedDefaults.containsKey("ats-priority")
+                        ? normalizedDefaults.get("ats-priority")
+                        : firstNonEmpty(normalizedDefaults, "priority-indicator", "subject-message-priority");
+                if (atsPriority != null && !atsPriority.trim().isEmpty()) {
+                    message.setStringparam(AMHS_att.ATS_S_PRIORITY_INDICATOR, atsPriority.trim());
+                    logger.debug("Set ATS priority: {}", printableAtsValue(atsPriority));
+                }
             }
 
             String extended = normalizedDefaults != null ? normalizedDefaults.get("extended") : null;
             boolean isExtended = extended != null && "true".equalsIgnoreCase(extended.trim());
-            message.setIntParam(AMHS_att.ATS_N_EXTENDED, isExtended ? 1 : 0);
-            if (isExtended) {
-                message.setStringparam(X400_att.X400_S_PRECEDENCE_POLICY_ID, "1.3.27.8.0.0");
+            if (!rawAtsHeader) {
+                message.setIntParam(AMHS_att.ATS_N_EXTENDED, isExtended ? 1 : 0);
+                if (isExtended) {
+                    message.setStringparam(X400_att.X400_S_PRECEDENCE_POLICY_ID, "1.3.27.8.0.0");
+                }
             }
 
             int contentType = parseNonNegativeIntOrDefault(normalizedDefaults.get("content-type"), 22);
             message.setIntParam(X400_att.X400_N_CONTENT_TYPE, contentType);
-            message.setStringparam(AMHS_att.ATS_S_TEXT, safeContent);
+            if (!rawAtsHeader) {
+                message.setStringparam(AMHS_att.ATS_S_TEXT, safeContent);
+            }
 
             if (normalizedDefaults != null) {
                 String expirationTime = normalizedDefaults.get("expiration-time");
@@ -1254,6 +1247,56 @@ public class AMHSPayloadGeneratorService {
             }
         }
 
+    }
+
+    private boolean isRawAtsHeaderMode(Map<String, String> amhsDefaults) {
+        if (amhsDefaults == null) {
+            return false;
+        }
+        String mode = amhsDefaults.get("ats-header-mode");
+        return mode != null && mode.toLowerCase(Locale.ROOT).startsWith("raw-");
+    }
+
+    /**
+     * Encode a basic ATS message in the IA5 body as:
+     * SOH + ATS-message-header + STX + ATS message text.
+     *
+     * This mode is used by CTSW004 so malformed header values reach the IUT as
+     * test data instead of being rejected by the Isode IHE attribute validator.
+     */
+    private String buildRawAtsBody(Map<String, String> amhsDefaults, String content) {
+        String header;
+        String priority = null;
+        String filingTime = null;
+
+        boolean literalHeader = "raw-literal".equalsIgnoreCase(amhsDefaults.get("ats-header-mode"));
+        if (literalHeader) {
+            String configuredHeader = amhsDefaults.get("ats-header");
+            header = configuredHeader == null ? "" : configuredHeader;
+        } else {
+            priority = amhsDefaults.containsKey("ats-priority")
+                    ? amhsDefaults.get("ats-priority") : "FF";
+            filingTime = amhsDefaults.containsKey("filing-time")
+                    ? amhsDefaults.get("filing-time") : formatCurrentFilingTime();
+            priority = priority == null ? "" : priority;
+            filingTime = filingTime == null ? "" : filingTime;
+            header = "PRI:" + priority + "\r\nFT:" + filingTime;
+        }
+
+        logger.info("Raw ATS header configured: priority={}, filing-time={}, header={}, IHE=absent",
+                printableAtsValue(priority), printableAtsValue(filingTime),
+                printableAtsValue(header));
+        return "\u0001" + header + "\u0002" + (content == null ? "" : content);
+    }
+
+    private String printableAtsValue(String value) {
+        if (value == null) {
+            return "<not present>";
+        }
+        if (value.isEmpty()) {
+            return "<empty>";
+        }
+        return value;
     }
 
     String resolveFilingTime(Map<String, String> amhsDefaults) {

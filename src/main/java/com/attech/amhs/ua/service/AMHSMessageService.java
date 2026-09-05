@@ -39,7 +39,7 @@ public class AMHSMessageService {
         AUTO,
         ACCEPT,
         STAGE_IPN,
-        RETURN_NDR
+        STAGE_NDR
     }
 
     private static final class PendingReceiptNotification {
@@ -68,10 +68,11 @@ public class AMHSMessageService {
         private final String messageIdentifier;
         private final int sequenceNumber;
         private final int notificationRequest;
+        private final boolean ndrAllowed;
 
         private PendingInteractiveNotification(long id, String originator, String subject,
                 String textPreview, String ipmId, String messageIdentifier, int sequenceNumber,
-                int notificationRequest) {
+                int notificationRequest, boolean ndrAllowed) {
             this.id = id;
             this.originator = originator;
             this.subject = subject;
@@ -80,6 +81,7 @@ public class AMHSMessageService {
             this.messageIdentifier = messageIdentifier;
             this.sequenceNumber = sequenceNumber;
             this.notificationRequest = notificationRequest;
+            this.ndrAllowed = ndrAllowed;
         }
     }
 
@@ -91,6 +93,7 @@ public class AMHSMessageService {
         private final String textPreview;
         private final String ipmId;
         private final int notificationRequest;
+        private final boolean ndrAllowed;
 
         private PendingNotificationChoice(PendingInteractiveNotification pending) {
             this.id = pending.id;
@@ -99,6 +102,7 @@ public class AMHSMessageService {
             this.textPreview = pending.textPreview;
             this.ipmId = pending.ipmId;
             this.notificationRequest = pending.notificationRequest;
+            this.ndrAllowed = pending.ndrAllowed;
         }
 
         public long getId() { return id; }
@@ -112,10 +116,13 @@ public class AMHSMessageService {
         public boolean canSendNrn() {
             return (notificationRequest & X400Msg.IPN_NON_RECEIPT_NOTIFICATION) != 0;
         }
+        public boolean canSendNdr() { return ndrAllowed; }
         public String getAllowedResponses() {
-            if (canSendRn() && canSendNrn()) return "RN / NRN";
-            if (canSendRn()) return "RN";
-            if (canSendNrn()) return "NRN";
+            List<String> responses = new ArrayList<>();
+            if (canSendRn()) responses.add("RN");
+            if (canSendNrn()) responses.add("NRN");
+            if (canSendNdr()) responses.add("NDR");
+            if (!responses.isEmpty()) return String.join(" / ", responses);
             return "None";
         }
     }
@@ -554,21 +561,20 @@ public class AMHSMessageService {
         List<MessageSummary> messages = new ArrayList<>();
         boolean prepareReceiptNotification = isCtsw014ReceiptNotification(selectedDefaults);
         ReceiveAction receiveAction = resolveReceiveAction(selectedDefaults);
-        int configuredNdrReason = receiveAction == ReceiveAction.RETURN_NDR
-                ? resolveResponseReason(selectedDefaults, "non-delivery-reason", 1) : 0;
         P7BindSession bindSession = null;
         boolean retainBindSession = false;
 
         if (prepareReceiptNotification) {
             discardPendingReceiptNotifications();
         }
-        if (receiveAction == ReceiveAction.STAGE_IPN) {
+        if (receiveAction == ReceiveAction.STAGE_IPN || receiveAction == ReceiveAction.STAGE_NDR) {
             synchronized (this) {
                 if (!pendingInteractiveNotifications.isEmpty()) {
-                    throw new X400APIException("Send or discard the pending RN/NRN responses before receiving more messages.");
+                    throw new X400APIException("Send or discard the pending responses before receiving more messages.");
                 }
             }
-            return inspectInteractiveNotificationMessages(maxMessages, pendingChoiceConsumer);
+            return inspectInteractiveNotificationMessages(maxMessages, pendingChoiceConsumer,
+                    receiveAction == ReceiveAction.STAGE_NDR);
         }
         
         try {
@@ -590,10 +596,8 @@ public class AMHSMessageService {
             
             for (int i = 0; i < toReceive; i++) {
                 ReceiveMsg rm = bindSession.receiveNextAvailableMessage();
-                int finishStatus = receiveAction == ReceiveAction.RETURN_NDR
-                        ? X400_att.X400_E_NONDELIVERED : X400_att.X400_E_NOERROR;
-                int finishReason = receiveAction == ReceiveAction.RETURN_NDR
-                        ? configuredNdrReason : 0;
+                int finishStatus = X400_att.X400_E_NOERROR;
+                int finishReason = 0;
                 boolean shouldFinishMessage = true;
 
                 MessageSummary summary = new MessageSummary();
@@ -622,12 +626,8 @@ public class AMHSMessageService {
                     }
                     
                     com.attech.amhs.ua.isode.ReceivedMessage1 receivedMsg = new com.attech.amhs.ua.isode.ReceivedMessage1(rm, 0);
-                    if (receiveAction == ReceiveAction.RETURN_NDR) {
-                        summary.setReportDetails("Returned NDR for received message; non-delivery reason="
-                                + finishReason + ".");
-                    }
                     // Set report type and details if this is a report message
-                    else if (receivedMsg.getType() == com.attech.amhs.ua.isode.enums.MessageType.REPORT) {
+                    if (receivedMsg.getType() == com.attech.amhs.ua.isode.enums.MessageType.REPORT) {
                         summary.setReportType("DR/NDR");
                         StringBuilder details = new StringBuilder();
                         if (receivedMsg.getReportRecips() != null && !receivedMsg.getReportRecips().isEmpty()) {
@@ -781,7 +781,7 @@ public class AMHSMessageService {
             return ReceiveAction.STAGE_IPN;
         }
         if ("ndr".equalsIgnoreCase(configured) || "return-ndr".equalsIgnoreCase(configured)) {
-            return ReceiveAction.RETURN_NDR;
+            return ReceiveAction.STAGE_NDR;
         }
         throw new X400APIException("Invalid receive-action: " + configured
                 + ". Expected auto, accept, stage-ipn, or return-ndr.");
@@ -814,7 +814,8 @@ public class AMHSMessageService {
     }
 
     private List<MessageSummary> inspectInteractiveNotificationMessages(int maxMessages,
-            Consumer<PendingNotificationChoice> pendingChoiceConsumer) throws X400APIException {
+            Consumer<PendingNotificationChoice> pendingChoiceConsumer, boolean ndrOnly)
+            throws X400APIException {
         List<MessageSummary> messages = new ArrayList<>();
         P7BindSession bindSession = null;
         try {
@@ -835,22 +836,41 @@ public class AMHSMessageService {
 
                     com.attech.amhs.ua.isode.ReceivedMessage1 parsed =
                             new com.attech.amhs.ua.isode.ReceivedMessage1(received, 0);
-                    if (parsed.getType() != com.attech.amhs.ua.isode.enums.MessageType.IPM) {
-                        summary.setReportDetails("Not staged: only IPMs can return RN or NRN.");
-                        continue;
+                    int supportedRequest = 0;
+                    boolean ndrAllowed = false;
+                    if (ndrOnly) {
+                        ndrAllowed = parsed.getType() == com.attech.amhs.ua.isode.enums.MessageType.IPM
+                                || parsed.getType() == com.attech.amhs.ua.isode.enums.MessageType.IPN;
+                        if (!ndrAllowed) {
+                            summary.setReportDetails("Not staged: NDR is available only for IPM or IPN messages.");
+                            continue;
+                        }
+                    } else {
+                        if (parsed.getType() != com.attech.amhs.ua.isode.enums.MessageType.IPM) {
+                            summary.setReportDetails("Not staged: only IPMs can return RN or NRN.");
+                            continue;
+                        }
+                        int request = parsed.getIpnRequest() != null ? parsed.getIpnRequest() : 0;
+                        supportedRequest = request
+                                & (X400Msg.IPN_RECEIPT_NOTIFICATION | X400Msg.IPN_NON_RECEIPT_NOTIFICATION);
+                        if (supportedRequest == 0) {
+                            summary.setReportDetails("Not staged: the IPM did not request RN or NRN.");
+                            continue;
+                        }
                     }
 
-                    int request = parsed.getIpnRequest() != null ? parsed.getIpnRequest() : 0;
-                    int supportedRequest = request
-                            & (X400Msg.IPN_RECEIPT_NOTIFICATION | X400Msg.IPN_NON_RECEIPT_NOTIFICATION);
-                    if (supportedRequest == 0) {
-                        summary.setReportDetails("Not staged: the IPM did not request RN or NRN.");
-                        continue;
-                    }
-
-                    String ipmId = trimToNull(parsed.getIpmId());
+                    String ipmId = parsed.getType() == com.attech.amhs.ua.isode.enums.MessageType.IPN
+                            ? trimToNull(parsed.getSubjectIpmId()) : trimToNull(parsed.getIpmId());
                     if (ipmId == null) {
-                        ipmId = trimToNull(received.getStringParam(X400_att.X400_S_IPM_IDENTIFIER));
+                        try {
+                            int identifierAttribute = parsed.getType()
+                                    == com.attech.amhs.ua.isode.enums.MessageType.IPN
+                                            ? X400_att.X400_S_SUBJECT_IPM
+                                            : X400_att.X400_S_IPM_IDENTIFIER;
+                            ipmId = trimToNull(received.getStringParam(identifierAttribute));
+                        } catch (Exception ex) {
+                            logger.log(Level.FINE, "Subject IPM identifier is unavailable: " + ex.getMessage());
+                        }
                     }
                     String messageIdentifier = trimToNull(received.getMessageIdentifier());
                     PendingInteractiveNotification pending;
@@ -859,13 +879,13 @@ public class AMHSMessageService {
                         pending = new PendingInteractiveNotification(
                                 nextPendingInteractiveNotificationId++, summary.getSender(),
                                 summary.getSubject(), createTextPreview(summary.getContent()), ipmId,
-                                messageIdentifier, listed.getSequenceNumber(), supportedRequest);
+                                messageIdentifier, listed.getSequenceNumber(), supportedRequest, ndrAllowed);
                         pendingInteractiveNotifications.add(pending);
                         choice = new PendingNotificationChoice(pending);
                     }
                     summary.setMessageId(messageIdentifier);
-                    summary.setReportDetails("RN/NRN response available for user selection. IPM ID="
-                            + ipmId + ".");
+                    summary.setReportDetails((ndrOnly ? "NDR" : "RN/NRN")
+                            + " response available for user selection. IPM ID=" + ipmId + ".");
                     if (pendingChoiceConsumer != null) {
                         pendingChoiceConsumer.accept(choice);
                     }
@@ -906,13 +926,8 @@ public class AMHSMessageService {
         try {
             summary.setContent(received.getTextContent());
         } catch (Exception ex) {
-            String message = ex.getMessage() != null ? ex.getMessage() : "";
-            if (message.contains("status = 80") || message.contains("COMPLEX_BODY")
-                    || message.contains("x400_ms_msggetstrparam")) {
-                summary.setContent(null);
-            } else {
-                throw new X400APIException(ex.getMessage());
-            }
+            summary.setContent(null);
+            logger.log(Level.FINE, "Text preview is unavailable for inspected message: " + ex.getMessage());
         }
         return summary;
     }
@@ -995,6 +1010,56 @@ public class AMHSMessageService {
                     bindSession.unbind();
                 } catch (Exception ex) {
                     logger.log(Level.FINE, "Error unbinding RN/NRN response session: " + ex.getMessage());
+                }
+            }
+        }
+    }
+
+    public synchronized String sendPendingNdr(long id, int nonDeliveryReason)
+            throws X400APIException {
+        PendingInteractiveNotification pending = findPendingInteractiveNotification(id);
+        if (pending == null) {
+            throw new X400APIException("The selected received message is no longer available.");
+        }
+        if (!pending.ndrAllowed) {
+            throw new X400APIException("NDR is not available for the selected message.");
+        }
+        if (nonDeliveryReason < 0) {
+            throw new X400APIException("The non-delivery reason must be zero or greater.");
+        }
+
+        P7BindSession bindSession = null;
+        ReceiveMsg received = null;
+        boolean receivedFinished = false;
+        try {
+            bindSession = new P7BindSession(normalizePresentationAddress(presentationAddress),
+                    userOrAddress, password);
+            bindSession.bind();
+            received = new ReceiveMsg(bindSession, pending.sequenceNumber);
+            verifyPendingMessageIdentity(received, pending);
+            int finishResult = received.finishWithMessage(
+                    X400_att.X400_E_NONDELIVERED, nonDeliveryReason);
+            if (finishResult != X400_att.X400_E_NOERROR) {
+                throw new X400APIException("Failed to return NDR for the selected message", finishResult);
+            }
+            receivedFinished = true;
+            pendingInteractiveNotifications.remove(pending);
+            logger.log(Level.INFO, "NDR returned for message " + pending.messageIdentifier
+                    + " with reason " + nonDeliveryReason + ".");
+            return pending.messageIdentifier != null ? pending.messageIdentifier : "(unavailable)";
+        } finally {
+            if (received != null && !receivedFinished) {
+                try {
+                    received.delete(true);
+                } catch (Exception ex) {
+                    logger.log(Level.FINE, "Error releasing NDR source message object: " + ex.getMessage());
+                }
+            }
+            if (bindSession != null) {
+                try {
+                    bindSession.unbind();
+                } catch (Exception ex) {
+                    logger.log(Level.FINE, "Error unbinding NDR response session: " + ex.getMessage());
                 }
             }
         }

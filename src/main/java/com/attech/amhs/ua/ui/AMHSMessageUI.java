@@ -98,6 +98,7 @@ public class AMHSMessageUI extends JFrame {
     private final List<AMHSMessageService.PendingNotificationChoice> pendingNotificationRows = new ArrayList<>();
     private JButton btnSendPendingRn;
     private JButton btnSendPendingNrn;
+    private JButton btnSendPendingNdr;
     private JButton btnDiscardPendingNotification;
     private JButton btnReceive;
     private final List<AMHSMessageService.PendingNotificationChoice> pendingChoiceUpdateBuffer = new ArrayList<>();
@@ -605,7 +606,7 @@ public class AMHSMessageUI extends JFrame {
         gbc.weightx = 0;
         gbc.weighty = 0;
         gbc.fill = GridBagConstraints.BOTH;
-        panel.add(new JLabel("Pending RN/NRN:"), gbc);
+        panel.add(new JLabel("Pending Responses:"), gbc);
 
         pendingNotificationTableModel = new DefaultTableModel(
                 new Object[] { "Allowed", "Originator", "Subject", "Text Preview" }, 0) {
@@ -627,7 +628,7 @@ public class AMHSMessageUI extends JFrame {
         panel.add(pendingScrollPane, gbc);
 
         gbc.gridy = 15;
-        gbc.gridx = 1;
+        gbc.gridx = 0;
         gbc.gridwidth = 1;
         gbc.weightx = 0;
         gbc.weighty = 0;
@@ -637,11 +638,17 @@ public class AMHSMessageUI extends JFrame {
         btnSendPendingRn.addActionListener(e -> sendSelectedPendingNotification(true));
         panel.add(btnSendPendingRn, gbc);
 
-        gbc.gridx = 2;
+        gbc.gridx = 1;
         btnSendPendingNrn = new JButton("Send NRN");
         btnSendPendingNrn.setEnabled(false);
         btnSendPendingNrn.addActionListener(e -> sendSelectedPendingNotification(false));
         panel.add(btnSendPendingNrn, gbc);
+
+        gbc.gridx = 2;
+        btnSendPendingNdr = new JButton("Send NDR");
+        btnSendPendingNdr.setEnabled(false);
+        btnSendPendingNdr.addActionListener(e -> sendSelectedPendingNdr());
+        panel.add(btnSendPendingNdr, gbc);
 
         gbc.gridx = 3;
         btnDiscardPendingNotification = new JButton("Discard");
@@ -1006,11 +1013,15 @@ public class AMHSMessageUI extends JFrame {
         defaults.remove("ftbp-content");
         defaults.putAll(collectEditableAmhsFields(recipient, subject, content, priority));
 
-        // A manual send always uses the current filing time. Removing both keys
-        // delegates generation to AMHSPayloadGeneratorService while leaving the
-        // original TestSubcase map untouched. Default and batch sends do not use
-        // this path, so negative filing-time test cases retain their definitions.
-        defaults.remove("filing-time");
+        // A normal manual send uses the current filing time. CTSW004 raw-header
+        // probes retain their configured empty/invalid filing time because that
+        // value is the test stimulus rather than an ordinary message default.
+        String atsHeaderMode = defaults.get("ats-header-mode");
+        boolean rawAtsHeaderTest = atsHeaderMode != null
+                && atsHeaderMode.toLowerCase(java.util.Locale.ROOT).startsWith("raw-");
+        if (!rawAtsHeaderTest) {
+            defaults.remove("filing-time");
+        }
         defaults.remove("header-empty");
 
         // Create an effectively final copy for use in lambda
@@ -1068,7 +1079,8 @@ public class AMHSMessageUI extends JFrame {
         }
         final boolean receivingCtsw014Subjects = "rn".equalsIgnoreCase(receiveDefaults.get("message-type"))
                 && receiveDefaults.containsKey("subject-message-priority");
-        final boolean stagingInteractiveResponses = "stage-ipn".equals(receiveAction);
+        final boolean stagingInteractiveResponses = "stage-ipn".equals(receiveAction)
+                || "return-ndr".equals(receiveAction);
         if (receivingCtsw014Subjects) {
             clearCtsw014SubjectSelector(true);
         }
@@ -1175,7 +1187,7 @@ public class AMHSMessageUI extends JFrame {
             addPendingNotificationRow(choice);
         }
         if (!batch.isEmpty()) {
-            appendOutput("Added " + batch.size() + " pending RN/NRN message(s) to the table.");
+            appendOutput("Added " + batch.size() + " pending response message(s) to the table.");
         }
     }
 
@@ -1239,6 +1251,10 @@ public class AMHSMessageUI extends JFrame {
             btnSendPendingNrn.setEnabled(!inspectingPendingNotifications
                     && selected != null && selected.canSendNrn());
         }
+        if (btnSendPendingNdr != null) {
+            btnSendPendingNdr.setEnabled(!inspectingPendingNotifications
+                    && selected != null && selected.canSendNdr());
+        }
         if (btnDiscardPendingNotification != null) {
             btnDiscardPendingNotification.setEnabled(!inspectingPendingNotifications && selected != null);
         }
@@ -1292,6 +1308,51 @@ public class AMHSMessageUI extends JFrame {
                 "reason must be 0 (ipm-discarded) or 1 (ipm-auto-forwarded).");
     }
 
+    private void sendSelectedPendingNdr() {
+        AMHSMessageService.PendingNotificationChoice selected = getSelectedPendingNotification();
+        if (selected == null) {
+            appendOutput("Select a received message first.");
+            return;
+        }
+
+        final int nonDeliveryReason;
+        try {
+            nonDeliveryReason = parseNonDeliveryReason(txtReceiveReason.getText());
+        } catch (IllegalArgumentException ex) {
+            appendOutput("Cannot send NDR: " + ex.getMessage());
+            return;
+        }
+        setPendingNotificationButtonsEnabled(false);
+        appendOutput("Returning NDR for message " + selected.getIpmId() + "...");
+        new Thread(() -> {
+            try {
+                String messageId = messageService.sendPendingNdr(
+                        selected.getId(), nonDeliveryReason);
+                SwingUtilities.invokeLater(() -> {
+                    appendOutput("NDR returned successfully for message ID: " + messageId);
+                    refreshPendingNotificationTable();
+                });
+            } catch (Throwable t) {
+                SwingUtilities.invokeLater(() -> {
+                    appendOutput("Failed to return NDR: " + t.getMessage());
+                    updatePendingNotificationButtons();
+                });
+            }
+        }).start();
+    }
+
+    private int parseNonDeliveryReason(String value) {
+        String reason = value != null ? value.trim() : "";
+        if (reason.isEmpty() || "unable-to-transfer".equalsIgnoreCase(reason)) return 1;
+        try {
+            int parsed = Integer.parseInt(reason);
+            if (parsed >= 0) return parsed;
+        } catch (NumberFormatException ignored) {
+            // Report one validation message for symbolic and numeric input.
+        }
+        throw new IllegalArgumentException("reason must be a non-negative number or unable-to-transfer.");
+    }
+
     private void discardSelectedPendingNotification() {
         AMHSMessageService.PendingNotificationChoice selected = getSelectedPendingNotification();
         if (selected == null) {
@@ -1319,6 +1380,7 @@ public class AMHSMessageUI extends JFrame {
         if (!enabled) {
             btnSendPendingRn.setEnabled(false);
             btnSendPendingNrn.setEnabled(false);
+            btnSendPendingNdr.setEnabled(false);
             btnDiscardPendingNotification.setEnabled(false);
         } else {
             updatePendingNotificationButtons();
