@@ -609,10 +609,10 @@ public class AMHSMessageUI extends JFrame {
         panel.add(new JLabel("Pending Responses:"), gbc);
 
         pendingNotificationTableModel = new DefaultTableModel(
-                new Object[] { "Allowed", "Originator", "Subject", "Text Preview" }, 0) {
+                new Object[] { "Allowed", "Originator", "Subject IPM", "Text Preview" }, 0) {
             @Override
             public boolean isCellEditable(int row, int column) {
-                return false;
+                return column == 2;
             }
         };
         tablePendingNotifications = new JTable(pendingNotificationTableModel);
@@ -1095,9 +1095,9 @@ public class AMHSMessageUI extends JFrame {
                     msgs = messageService.receiveMessages(Integer.MAX_VALUE, receiveDefaults,
                             this::enqueuePendingNotificationRow);
                 } else if ("return-ndr".equals(receiveAction)) {
-                    // Preserve the pre-table NDR behavior: receive and return an
-                    // NDR for every available message without staging table rows.
-                    msgs = messageService.receiveMessages(Integer.MAX_VALUE, receiveDefaults);
+                    // Use the isolated pre-table P7 behavior: finish every
+                    // received message as non-delivered on its live session.
+                    msgs = messageService.receiveAndReturnAllNdrLegacy(receiveDefaults);
                 } else {
                     List<AMHSMessageService.MessageSummary> all = messageService.getMailboxSummary();
                     if (all.isEmpty()) {
@@ -1199,7 +1199,7 @@ public class AMHSMessageUI extends JFrame {
         }
         pendingNotificationRows.add(choice);
         pendingNotificationTableModel.addRow(new Object[] {
-                choice.getAllowedResponses(), choice.getOriginator(), choice.getSubject(),
+                choice.getAllowedResponses(), choice.getOriginator(), choice.getIpmId(),
                 choice.getTextPreview()
         });
         if (tablePendingNotifications.getSelectedRow() < 0) {
@@ -1221,7 +1221,7 @@ public class AMHSMessageUI extends JFrame {
         for (int i = 0; i < pendingNotificationRows.size(); i++) {
             AMHSMessageService.PendingNotificationChoice choice = pendingNotificationRows.get(i);
             pendingNotificationTableModel.addRow(new Object[] {
-                    choice.getAllowedResponses(), choice.getOriginator(), choice.getSubject(),
+                    choice.getAllowedResponses(), choice.getOriginator(), choice.getIpmId(),
                     choice.getTextPreview()
             });
             if (selectedId != null && selectedId.longValue() == choice.getId()) {
@@ -1259,9 +1259,22 @@ public class AMHSMessageUI extends JFrame {
     }
 
     private void sendSelectedPendingNotification(boolean sendRn) {
+        if (tablePendingNotifications != null && tablePendingNotifications.isEditing()) {
+            tablePendingNotifications.getCellEditor().stopCellEditing();
+        }
         AMHSMessageService.PendingNotificationChoice selected = getSelectedPendingNotification();
         if (selected == null) {
             appendOutput("Select a received message first.");
+            return;
+        }
+
+        int viewRow = tablePendingNotifications.getSelectedRow();
+        int modelRow = tablePendingNotifications.convertRowIndexToModel(viewRow);
+        Object subjectIpmValue = pendingNotificationTableModel.getValueAt(modelRow, 2);
+        final String subjectIpm = subjectIpmValue != null
+                ? subjectIpmValue.toString().trim() : "";
+        if (subjectIpm.isEmpty()) {
+            appendOutput("Cannot send RN/NRN: Subject IPM must not be empty.");
             return;
         }
 
@@ -1274,11 +1287,11 @@ public class AMHSMessageUI extends JFrame {
         }
         setPendingNotificationButtonsEnabled(false);
         String responseName = sendRn ? "RN" : "NRN";
-        appendOutput("Sending " + responseName + " for IPM " + selected.getIpmId() + "...");
+        appendOutput("Sending " + responseName + " for Subject IPM " + subjectIpm + "...");
         new Thread(() -> {
             try {
                 String messageId = messageService.sendPendingNotification(
-                        selected.getId(), sendRn, nrnReason);
+                        selected.getId(), sendRn, nrnReason, subjectIpm);
                 SwingUtilities.invokeLater(() -> {
                     appendOutput(responseName + " sent successfully. Message ID: " + messageId);
                     refreshPendingNotificationTable();

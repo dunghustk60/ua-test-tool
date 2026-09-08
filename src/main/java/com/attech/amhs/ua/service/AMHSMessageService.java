@@ -780,6 +780,89 @@ public class AMHSMessageService {
         return messages;
     }
 
+    /** Immediately finish every received P7 message as non-delivered. */
+    public List<MessageSummary> receiveAndReturnAllNdrLegacy(Map<String, String> selectedDefaults)
+            throws X400APIException {
+        List<MessageSummary> messages = new ArrayList<>();
+        int nonDeliveryReason = resolveResponseReason(
+                selectedDefaults, "non-delivery-reason", 1);
+        P7BindSession bindSession = new P7BindSession(
+                normalizePresentationAddress(presentationAddress), userOrAddress, password);
+
+        try {
+            bindSession.bind();
+            int numberOfMessages = bindSession.getRefreshNumberOfMessages();
+            logger.log(Level.INFO, "Immediate P7 NDR processing found "
+                    + numberOfMessages + " message(s).");
+            List<String> failures = new ArrayList<>();
+
+            for (int index = 0; index < numberOfMessages; index++) {
+                ReceiveMsg received = null;
+                boolean sourceFinished = false;
+                try {
+                    received = bindSession.receiveNextAvailableMessage();
+                    int messageType = received.GetType();
+                    MessageSummary summary = new MessageSummary();
+                    int finishStatus = received.finishWithMessage(
+                            messageType == X400_att.X400_MSG_REPORT
+                                    ? X400_att.X400_E_NOERROR
+                                    : X400_att.X400_E_NONDELIVERED,
+                            messageType == X400_att.X400_MSG_REPORT
+                                    ? 0 : nonDeliveryReason);
+                    sourceFinished = finishStatus == X400_att.X400_E_NOERROR;
+                    if (!sourceFinished) {
+                        throw new X400APIException(
+                                "Immediate finish failed for mailbox message " + (index + 1)
+                                + " [messageType=" + messageType
+                                + ", nativeCode=" + finishStatus + "]", finishStatus);
+                    }
+
+                    if (messageType == X400_att.X400_MSG_REPORT) {
+                        summary.setReportType("NDR SKIPPED");
+                        summary.setReportDetails("Existing DR/NDR report accepted immediately; "
+                                + "native status=" + finishStatus + ".");
+                    } else {
+                        summary.setReportType("NDR");
+                        summary.setReportDetails("Message was immediately finished as non-delivered; "
+                                + "message type=" + messageType + ", reason="
+                                + nonDeliveryReason + ", native status=" + finishStatus + ".");
+                    }
+                    messages.add(summary);
+                    logger.log(Level.INFO, "Immediate P7 completion for mailbox message "
+                            + (index + 1) + " of " + numberOfMessages
+                            + ": message type=" + messageType + ", finish status="
+                            + finishStatus + ".");
+                } catch (Exception ex) {
+                    String failure = "mailbox message " + (index + 1) + ": " + ex.getMessage();
+                    failures.add(failure);
+                    logger.log(Level.WARNING, "Unable to complete NDR for " + failure, ex);
+                } finally {
+                    if (received != null && !sourceFinished) {
+                        try {
+                            received.delete(true);
+                        } catch (Exception ex) {
+                            logger.log(Level.FINE,
+                                    "Error releasing NDR source message: " + ex.getMessage());
+                        }
+                    }
+                }
+            }
+            if (!failures.isEmpty()) {
+                throw new X400APIException("Processed " + messages.size() + " of "
+                        + numberOfMessages + " immediate P7 message(s). Failures: "
+                        + String.join("; ", failures));
+            }
+            return messages;
+        } finally {
+            try {
+                bindSession.unbind();
+            } catch (Exception ex) {
+                logger.log(Level.FINE,
+                        "Error unbinding legacy P7 NDR receive session: " + ex.getMessage());
+            }
+        }
+    }
+
     private ReceiveAction resolveReceiveAction(Map<String, String> defaults) throws X400APIException {
         String configured = defaults != null ? trimToNull(defaults.get("receive-action")) : null;
         if (configured == null || "auto".equalsIgnoreCase(configured)) {
@@ -953,8 +1036,19 @@ public class AMHSMessageService {
     public synchronized String sendPendingNotification(long id, boolean sendRn, int nrnReason)
             throws X400APIException {
         PendingInteractiveNotification pending = findPendingInteractiveNotification(id);
+        return sendPendingNotification(id, sendRn, nrnReason,
+                pending != null ? pending.ipmId : null);
+    }
+
+    public synchronized String sendPendingNotification(long id, boolean sendRn, int nrnReason,
+            String subjectIpm) throws X400APIException {
+        PendingInteractiveNotification pending = findPendingInteractiveNotification(id);
         if (pending == null) {
             throw new X400APIException("The selected received message is no longer available.");
+        }
+        String effectiveSubjectIpm = trimToNull(subjectIpm);
+        if (effectiveSubjectIpm == null) {
+            throw new X400APIException("Subject IPM must not be empty.");
         }
         int requiredBit = sendRn ? X400Msg.IPN_RECEIPT_NOTIFICATION
                 : X400Msg.IPN_NON_RECEIPT_NOTIFICATION;
@@ -981,6 +1075,7 @@ public class AMHSMessageService {
             if (response == null) {
                 throw new X400APIException("Isode could not generate the requested " + responseName + ".");
             }
+            response.setStringparam(X400_att.X400_S_SUBJECT_IPM, effectiveSubjectIpm);
             response.sendMsg(bindSession);
             responseSent = true;
             String responseMessageId = null;
@@ -995,7 +1090,8 @@ public class AMHSMessageService {
                 logger.log(Level.WARNING, "Notification was sent, but finishing source IPM returned "
                         + finishResult + ".");
             }
-            logger.log(Level.INFO, responseName + " sent for received IPM " + pending.ipmId + ".");
+            logger.log(Level.INFO, responseName + " sent with Subject IPM "
+                    + effectiveSubjectIpm + " for received IPM " + pending.ipmId + ".");
             return responseMessageId != null ? responseMessageId : "(unavailable)";
         } finally {
             if (responseSent) {
