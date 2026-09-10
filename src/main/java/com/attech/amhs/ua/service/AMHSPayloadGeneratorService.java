@@ -763,9 +763,7 @@ public class AMHSPayloadGeneratorService {
         String originatorRef = amhsDefaults.get("originator-reference");
         if (originatorRef != null && !originatorRef.trim().isEmpty()) {
             try {
-                String currentOhi = amhsDefaults.getOrDefault("optional-heading-info", "");
-                String newOhi = (currentOhi.isEmpty() ? "" : currentOhi + " ") + "REF:" + originatorRef.trim();
-                message.setStringparam(AMHS_att.ATS_S_OPTIONAL_HEADING_INFO, newOhi);
+                message.setStringparam(X400_att.X400_S_ORIGINATORS_REFERENCE, originatorRef.trim());
             } catch (Exception e) {
                 logger.warn("Failed to set originator-reference: {}", e.getMessage());
             }
@@ -1082,11 +1080,8 @@ public class AMHSPayloadGeneratorService {
         String originatorRef = amhsDefaults.get("originator-reference");
         if (originatorRef != null && !originatorRef.trim().isEmpty()) {
             try {
-                // Store in OHI if separate field not available
-                String currentOhi = amhsDefaults.get("optional-heading-info");
-                String newOhi = (currentOhi != null ? currentOhi + " " : "") + "REF:" + originatorRef.trim();
-                message.setStringparam(AMHS_att.ATS_S_OPTIONAL_HEADING_INFO, newOhi);
-                logger.debug("Set originator-reference via OHI: {}", originatorRef);
+                message.setStringparam(X400_att.X400_S_ORIGINATORS_REFERENCE, originatorRef.trim());
+                logger.debug("Set originator-reference: {}", originatorRef);
             } catch (Exception e) {
                 logger.warn("Failed to set originator-reference: {}", e.getMessage());
             }

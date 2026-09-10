@@ -86,6 +86,7 @@ public class AMHSMessageUI extends JFrame {
     private JComboBox<String> comboDrReq;
     private JComboBox<String> comboRnReq;
     private JComboBox<String> comboMtaReportReq;
+    private JTextField txtOriginatorsReference;
     private JTextField txtATSHeader; // Custom ATS Header
     private JTextField txtPayloadSize; // Generated payload size in bytes
     private JTextField txtFTBPFileName; // FTBP File Name
@@ -400,9 +401,23 @@ public class AMHSMessageUI extends JFrame {
         txtOHI.setToolTipText("Optional Heading Info");
         panel.add(txtOHI, gbc);
 
-        // Content
+        // Originators Reference (editable only for subcases that define it)
         gbc.gridx = 0;
         gbc.gridy = 6;
+        gbc.gridwidth = 1;
+        gbc.weightx = 0;
+        panel.add(new JLabel("Originators Reference:"), gbc);
+        gbc.gridx = 1;
+        gbc.gridwidth = 3;
+        gbc.weightx = 1.0;
+        txtOriginatorsReference = new JTextField("", 30);
+        txtOriginatorsReference.setToolTipText("X.400 originators-reference attribute");
+        txtOriginatorsReference.setEnabled(false);
+        panel.add(txtOriginatorsReference, gbc);
+
+        // Content
+        gbc.gridx = 0;
+        gbc.gridy = 7;
         gbc.gridwidth = 1;
         gbc.weightx = 0;
         gbc.anchor = GridBagConstraints.NORTHWEST;
@@ -428,7 +443,7 @@ public class AMHSMessageUI extends JFrame {
 
         // Encoding (AMHS-specific)
         gbc.gridx = 0;
-        gbc.gridy = 7;
+        gbc.gridy = 8;
         gbc.gridwidth = 1;
         gbc.weightx = 0;
         panel.add(new JLabel("Encoding:"), gbc);
@@ -459,7 +474,7 @@ public class AMHSMessageUI extends JFrame {
 
         // Content Type (AMHS-specific)
         gbc.gridx = 0;
-        gbc.gridy = 8;
+        gbc.gridy = 9;
         gbc.gridwidth = 1;
         gbc.weightx = 0;
         panel.add(new JLabel("Content Type:"), gbc);
@@ -488,7 +503,7 @@ public class AMHSMessageUI extends JFrame {
 
         // Body Part Type (AMHS-specific - FTBP support)
         gbc.gridx = 0;
-        gbc.gridy = 9;
+        gbc.gridy = 10;
         gbc.gridwidth = 1;
         gbc.weightx = 0;
         panel.add(new JLabel("Body Part Type:"), gbc);
@@ -517,7 +532,7 @@ public class AMHSMessageUI extends JFrame {
 
         // Generated payload size
         gbc.gridx = 0;
-        gbc.gridy = 10;
+        gbc.gridy = 11;
         gbc.gridwidth = 1;
         gbc.weightx = 0;
         gbc.weighty = 0;
@@ -532,7 +547,7 @@ public class AMHSMessageUI extends JFrame {
 
         // FTBP Content (multi-line for file content)
         gbc.gridx = 0;
-        gbc.gridy = 11;
+        gbc.gridy = 12;
         gbc.gridwidth = 1;
         gbc.weightx = 0;
         gbc.anchor = GridBagConstraints.NORTHWEST;
@@ -549,7 +564,7 @@ public class AMHSMessageUI extends JFrame {
 
         // CTSW014 subject selection (populated when matching subject IPMs are received)
         gbc.gridx = 0;
-        gbc.gridy = 12;
+        gbc.gridy = 13;
         gbc.gridwidth = 1;
         gbc.weightx = 0;
         gbc.weighty = 0;
@@ -577,7 +592,7 @@ public class AMHSMessageUI extends JFrame {
 
         // Response returned after receiving the next mailbox message
         gbc.gridx = 0;
-        gbc.gridy = 13;
+        gbc.gridy = 14;
         gbc.gridwidth = 1;
         gbc.weightx = 0;
         panel.add(new JLabel("Receive Response:"), gbc);
@@ -600,7 +615,7 @@ public class AMHSMessageUI extends JFrame {
         panel.add(txtReceiveReason, gbc);
 
         // Received IPMs awaiting an operator-selected RN or NRN.
-        gbc.gridy = 14;
+        gbc.gridy = 15;
         gbc.gridx = 0;
         gbc.gridwidth = 1;
         gbc.weightx = 0;
@@ -627,7 +642,7 @@ public class AMHSMessageUI extends JFrame {
         gbc.weighty = 0.4;
         panel.add(pendingScrollPane, gbc);
 
-        gbc.gridy = 15;
+        gbc.gridy = 16;
         gbc.gridx = 0;
         gbc.gridwidth = 1;
         gbc.weightx = 0;
@@ -651,7 +666,7 @@ public class AMHSMessageUI extends JFrame {
         panel.add(btnDiscardPendingNotification, gbc);
 
         // Main operation buttons
-        gbc.gridy = 16;
+        gbc.gridy = 17;
         gbc.gridwidth = 1;
         gbc.weightx = 0;
         gbc.weighty = 0;
@@ -1652,6 +1667,9 @@ public class AMHSMessageUI extends JFrame {
         fields.put("priority", priority != null ? priority.toString() : "NORMAL_PRIORITY");
         fields.put("ats-priority", txtATSPriority.getText().trim());
         fields.put("optional-heading-info", txtOHI.getText().trim());
+        if (txtOriginatorsReference.isEnabled()) {
+            fields.put("originator-reference", txtOriginatorsReference.getText().trim());
+        }
         fields.put("ats-header", txtATSHeader.getText().trim());
         fields.put("encoding", valueOrDefault((String) comboEncoding.getSelectedItem(), ""));
         fields.put("charset-reg-number", valueOrDefault((String) comboCharset.getSelectedItem(), ""));
@@ -1933,6 +1951,10 @@ public class AMHSMessageUI extends JFrame {
         }
 
         txtOHI.setText(valueOrDefault(defaults.get("optional-heading-info"), ""));
+        String originatorsReference = valueOrDefault(defaults.get("originator-reference"), "");
+        boolean hasOriginatorsReference = !originatorsReference.trim().isEmpty();
+        txtOriginatorsReference.setText(hasOriginatorsReference ? originatorsReference : "");
+        txtOriginatorsReference.setEnabled(hasOriginatorsReference);
         txtATSHeader.setText(valueOrDefault(defaults.get("ats-header"), ""));
         comboDrReq.setSelectedItem(toDrSelection(defaults.get("originator-report-request")));
         comboRnReq.setSelectedItem(toRnSelection(defaults.get("receipt-notification")));
