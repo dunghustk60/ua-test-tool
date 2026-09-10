@@ -93,6 +93,8 @@ public class AMHSMessageUI extends JFrame {
     private JTextField txtFTBPFileName; // FTBP File Name
     private JTextArea txtFTBPContent; // FTBP Content
     private String selectedFtbpAttachmentPath;
+    private JButton btnAttachFtbp;
+    private JButton btnClearFtbpAttachment;
     private JComboBox<AMHSMessageService.ReceiptNotificationSubject> comboCtsw014Subject;
     private JComboBox<String> comboReceiveAction;
     private JTextField txtReceiveReason;
@@ -518,6 +520,7 @@ public class AMHSMessageUI extends JFrame {
         comboBodyPartType.setSelectedItem("ia5-text");
         comboBodyPartType.setEditable(true);
         comboBodyPartType.setToolTipText("Body part type for the message");
+        comboBodyPartType.addActionListener(e -> updateFtbpControls());
         panel.add(comboBodyPartType, gbc);
 
         // FTBP File Name (only shown/used when file-transfer-body-part is selected)
@@ -550,10 +553,16 @@ public class AMHSMessageUI extends JFrame {
         gbc.gridx = 2;
         gbc.gridwidth = 2;
         gbc.weightx = 0;
-        JButton btnAttachFtbp = new JButton("Attach FTBP File...");
+        JPanel ftbpButtons = new JPanel(new GridLayout(1, 2, 5, 0));
+        btnAttachFtbp = new JButton("Attach FTBP File...");
         btnAttachFtbp.setToolTipText("Select a binary file for a file-transfer-body-part");
         btnAttachFtbp.addActionListener(e -> browseFtbpAttachment());
-        panel.add(btnAttachFtbp, gbc);
+        ftbpButtons.add(btnAttachFtbp);
+        btnClearFtbpAttachment = new JButton("Clear Attachment");
+        btnClearFtbpAttachment.setToolTipText("Restore configured FTBP filename and content");
+        btnClearFtbpAttachment.addActionListener(e -> clearFtbpAttachment());
+        ftbpButtons.add(btnClearFtbpAttachment);
+        panel.add(ftbpButtons, gbc);
 
         // FTBP Content (multi-line for file content)
         gbc.gridx = 0;
@@ -571,6 +580,7 @@ public class AMHSMessageUI extends JFrame {
         txtFTBPContent.setText("");
         txtFTBPContent.setToolTipText("Content for file-transfer-body-part (will be converted to bytes)");
         panel.add(new JScrollPane(txtFTBPContent), gbc);
+        updateFtbpControls();
 
         // CTSW014 subject selection (populated when matching subject IPMs are received)
         gbc.gridx = 0;
@@ -1690,8 +1700,7 @@ public class AMHSMessageUI extends JFrame {
                 (String) comboBodyPartType.getSelectedItem(), "ia5-text");
         fields.put("body-part-type", selectedBodyPartType);
         fields.put("payload-size", txtPayloadSize.getText().trim());
-        if (selectedBodyPartType.toLowerCase().contains("file-transfer")
-                || selectedBodyPartType.toLowerCase().contains("ftbp")) {
+        if (containsFileTransferBodyPart(selectedBodyPartType)) {
             fields.put("ftbp-file-name", txtFTBPFileName.getText().trim());
             if (selectedFtbpAttachmentPath != null && !selectedFtbpAttachmentPath.trim().isEmpty()) {
                 fields.put("ftbp-file-path", selectedFtbpAttachmentPath);
@@ -2002,6 +2011,7 @@ public class AMHSMessageUI extends JFrame {
         comboContentType.setSelectedItem(valueOrDefault(defaults.get("content-type"), "22"));
         txtPayloadSize.setText(valueOrDefault(defaults.get("payload-size"), ""));
         selectedFtbpAttachmentPath = null;
+        txtFTBPFileName.setToolTipText("File name for file-transfer-body-part");
         boolean hasFileTransferBodyPart = bodyPartType != null
                 && (bodyPartType.toLowerCase().contains("file-transfer")
                         || bodyPartType.toLowerCase().contains("ftbp"));
@@ -2011,6 +2021,7 @@ public class AMHSMessageUI extends JFrame {
         txtFTBPContent.setText(hasFileTransferBodyPart
                 ? valueOrDefault(defaults.get("ftbp-content"), "")
                 : "");
+        updateFtbpControls();
     }
 
     // ── Utility helpers ───────────────────────────────────────────────────
@@ -2156,6 +2167,11 @@ public class AMHSMessageUI extends JFrame {
     }
 
     private void browseFtbpAttachment() {
+        if (!containsFileTransferBodyPart(valueOrDefault(
+                (String) comboBodyPartType.getSelectedItem(), ""))) {
+            appendOutput("Select a body-part type containing file-transfer-body-part first.");
+            return;
+        }
         JFileChooser chooser = new JFileChooser();
         if (chooser.showOpenDialog(this) != JFileChooser.APPROVE_OPTION) return;
 
@@ -2163,8 +2179,49 @@ public class AMHSMessageUI extends JFrame {
         selectedFtbpAttachmentPath = attachment.getAbsolutePath();
         txtFTBPFileName.setText(attachment.getName());
         txtFTBPContent.setText("");
+        txtFTBPFileName.setToolTipText(selectedFtbpAttachmentPath);
         appendOutput("Selected FTBP attachment: " + attachment.getName()
-                + " (" + attachment.length() + " bytes)");
+                + " (" + attachment.length() + " bytes), path=" + selectedFtbpAttachmentPath);
+        updateFtbpControls();
+    }
+
+    private void clearFtbpAttachment() {
+        selectedFtbpAttachmentPath = null;
+        TestSubcase selectedSubcase = getSelectedSubcase();
+        Map<String, String> defaults = selectedSubcase != null
+                ? selectedSubcase.getAmhsDefaults() : java.util.Collections.emptyMap();
+        txtFTBPFileName.setText(valueOrDefault(
+                defaults.get("ftbp-file-name"), "attachment.bin"));
+        txtFTBPContent.setText(valueOrDefault(defaults.get("ftbp-content"), ""));
+        txtFTBPFileName.setToolTipText("File name for file-transfer-body-part");
+        appendOutput("Cleared selected FTBP attachment; restored configured FTBP content.");
+        updateFtbpControls();
+    }
+
+    private boolean containsFileTransferBodyPart(String bodyPartTypes) {
+        if (bodyPartTypes == null) return false;
+        for (String bodyPartType : bodyPartTypes.split("[;,]")) {
+            String normalized = bodyPartType.trim().toLowerCase(java.util.Locale.ROOT);
+            if (normalized.contains("file-transfer") || "ftbp".equals(normalized)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private void updateFtbpControls() {
+        if (comboBodyPartType == null) return;
+        boolean enabled = containsFileTransferBodyPart(valueOrDefault(
+                (String) comboBodyPartType.getSelectedItem(), ""));
+        if (txtFTBPFileName != null) txtFTBPFileName.setEnabled(enabled);
+        if (txtFTBPContent != null) txtFTBPContent.setEnabled(enabled);
+        if (btnAttachFtbp != null) btnAttachFtbp.setEnabled(enabled);
+        if (btnClearFtbpAttachment != null) {
+            btnClearFtbpAttachment.setEnabled(enabled
+                    && selectedFtbpAttachmentPath != null
+                    && !selectedFtbpAttachmentPath.trim().isEmpty());
+        }
+        if (!enabled) selectedFtbpAttachmentPath = null;
     }
 
     // ── Config file I/O ───────────────────────────────────────────────────
