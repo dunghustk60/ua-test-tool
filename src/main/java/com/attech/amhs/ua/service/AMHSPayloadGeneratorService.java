@@ -586,18 +586,37 @@ public class AMHSPayloadGeneratorService {
         }
     }
 
-    private String padContent(String content, int length) {
-        if (length <= 0) {
-            return content != null ? content : "";
+    /**
+     * Repeats the original content until the requested UTF-8 payload size is
+     * reached. The final repetition is truncated only at a valid character
+     * boundary. CTSW006 uses IA5 content, so its result is exactly targetBytes.
+     */
+    public static String repeatContentToPayloadSize(String content, int targetBytes) {
+        String original = content != null ? content : "";
+        if (targetBytes <= 0 || original.isEmpty()) return original;
+
+        byte[] originalBytes = original.getBytes(StandardCharsets.UTF_8);
+        if (originalBytes.length == 0) return original;
+
+        StringBuilder repeated = new StringBuilder(
+                Math.max(original.length(), targetBytes));
+        int currentBytes = 0;
+        while (currentBytes + originalBytes.length <= targetBytes) {
+            repeated.append(original);
+            currentBytes += originalBytes.length;
         }
-        StringBuilder builder = new StringBuilder(content != null ? content : "");
-        while (builder.length() < length) {
-            builder.append('X');
+
+        int remainingBytes = targetBytes - currentBytes;
+        for (int offset = 0; offset < original.length() && remainingBytes > 0;) {
+            int codePoint = original.codePointAt(offset);
+            String character = new String(Character.toChars(codePoint));
+            int characterBytes = character.getBytes(StandardCharsets.UTF_8).length;
+            if (characterBytes > remainingBytes) break;
+            repeated.append(character);
+            remainingBytes -= characterBytes;
+            offset += Character.charCount(codePoint);
         }
-        if (builder.length() > length) {
-            return builder.substring(0, length);
-        }
-        return builder.toString();
+        return repeated.toString();
     }
 
     private String resolveBodyContent(Map<String, String> amhsDefaults, String fallbackContent) {
@@ -609,7 +628,7 @@ public class AMHSPayloadGeneratorService {
         String contentLength = amhsDefaults != null ? amhsDefaults.get("content-length") : null;
         if (contentLength != null && !contentLength.trim().isEmpty()) {
             int length = parseIntOrDefault(contentLength, baseContent.length());
-            return padContent(baseContent, length);
+            return repeatContentToPayloadSize(baseContent, length);
         }
 
         String payloadSize = amhsDefaults != null ? amhsDefaults.get("payload-size") : null;
@@ -617,14 +636,14 @@ public class AMHSPayloadGeneratorService {
             String configuredSize = payloadSize.trim();
             int numericSize = parseIntOrDefault(configuredSize, -1);
             if (numericSize > 0) {
-                return padContent(baseContent, numericSize);
+                return repeatContentToPayloadSize(baseContent, numericSize);
             }
             // Backward compatibility for existing testcase configurations.
             if ("exceed-limit".equalsIgnoreCase(configuredSize)) {
-                return padContent(baseContent, 4096);
+                return repeatContentToPayloadSize(baseContent, 4096);
             }
             if ("within-limit".equalsIgnoreCase(configuredSize)) {
-                return padContent(baseContent, 1024);
+                return repeatContentToPayloadSize(baseContent, 1024);
             }
         }
 
@@ -1447,18 +1466,32 @@ public class AMHSPayloadGeneratorService {
             logger.debug("Adding file-transfer-body-part");
             String fileName = amhsDefaults != null ? amhsDefaults.get("ftbp-file-name") : null;
             String ftbpContent = amhsDefaults != null ? amhsDefaults.get("ftbp-content") : null;
+            String ftbpFilePath = amhsDefaults != null ? amhsDefaults.get("ftbp-file-path") : null;
 
             // Use default filename if not specified
             if (fileName == null || fileName.trim().isEmpty()) {
                 fileName = "attachment.bin";
             }
 
-            // Prefer explicitly configured FTBP content. Otherwise use the resolved
-            // body content so payload-size/content-length also apply to binary FTBPs.
-            String binaryContent = ftbpContent != null && !ftbpContent.isEmpty()
-                    ? ftbpContent
-                    : safeContent;
-            byte[] contentBytes = binaryContent.getBytes(StandardCharsets.UTF_8);
+            byte[] contentBytes;
+            if (ftbpFilePath != null && !ftbpFilePath.trim().isEmpty()) {
+                try {
+                    java.nio.file.Path attachmentPath = java.nio.file.Paths.get(ftbpFilePath.trim());
+                    contentBytes = java.nio.file.Files.readAllBytes(attachmentPath);
+                    fileName = attachmentPath.getFileName().toString();
+                    logger.info("Loaded FTBP attachment: path={}, bytes={}",
+                            attachmentPath, contentBytes.length);
+                } catch (java.io.IOException | java.nio.file.InvalidPathException ex) {
+                    throw new X400APIException("Unable to read FTBP attachment: " + ex.getMessage());
+                }
+            } else {
+                // Prefer explicitly configured FTBP content. Otherwise use the
+                // repeated payload content resolved from payload-size.
+                String binaryContent = ftbpContent != null && !ftbpContent.isEmpty()
+                        ? ftbpContent
+                        : safeContent;
+                contentBytes = binaryContent.getBytes(StandardCharsets.UTF_8);
+            }
 
             BodypartFTBP ftbp = new BodypartFTBP(fileName.trim(), contentBytes);
             message.addBodypart(ftbp);

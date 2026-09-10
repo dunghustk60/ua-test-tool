@@ -9,6 +9,7 @@ import com.attech.amhs.ua.model.MessageLog;
 import com.attech.amhs.ua.model.TestCase;
 import com.attech.amhs.ua.model.TestSubcase;
 import com.attech.amhs.ua.repository.TestCaseRepository;
+import com.attech.amhs.ua.service.AMHSPayloadGeneratorService;
 import com.attech.amhs.ua.service.AMHSMessageService;
 import com.attech.amhs.ua.service.TestCaseConfigLoader;
 import com.attech.amhs.ua.service.TestCaseLoader;
@@ -91,6 +92,7 @@ public class AMHSMessageUI extends JFrame {
     private JTextField txtPayloadSize; // Generated payload size in bytes
     private JTextField txtFTBPFileName; // FTBP File Name
     private JTextArea txtFTBPContent; // FTBP Content
+    private String selectedFtbpAttachmentPath;
     private JComboBox<AMHSMessageService.ReceiptNotificationSubject> comboCtsw014Subject;
     private JComboBox<String> comboReceiveAction;
     private JTextField txtReceiveReason;
@@ -544,6 +546,14 @@ public class AMHSMessageUI extends JFrame {
         txtPayloadSize = new JTextField("", 8);
         txtPayloadSize.setToolTipText("Positive payload size in bytes; blank keeps the content unchanged");
         panel.add(txtPayloadSize, gbc);
+
+        gbc.gridx = 2;
+        gbc.gridwidth = 2;
+        gbc.weightx = 0;
+        JButton btnAttachFtbp = new JButton("Attach FTBP File...");
+        btnAttachFtbp.setToolTipText("Select a binary file for a file-transfer-body-part");
+        btnAttachFtbp.addActionListener(e -> browseFtbpAttachment());
+        panel.add(btnAttachFtbp, gbc);
 
         // FTBP Content (multi-line for file content)
         gbc.gridx = 0;
@@ -1020,6 +1030,7 @@ public class AMHSMessageUI extends JFrame {
         defaults.remove("rn");
         defaults.remove("ftbp-file-name");
         defaults.remove("ftbp-content");
+        defaults.remove("ftbp-file-path");
         defaults.putAll(collectEditableAmhsFields(recipient, subject, content, priority));
 
         // A normal manual send uses the current filing time. CTSW004 raw-header
@@ -1417,6 +1428,7 @@ public class AMHSMessageUI extends JFrame {
         txtPayloadSize.setText("");
         txtFTBPFileName.setText("attachment.bin");
         txtFTBPContent.setText("");
+        selectedFtbpAttachmentPath = null;
         comboReceiveAction.setSelectedItem("Auto");
         txtReceiveReason.setText("");
     }
@@ -1681,10 +1693,15 @@ public class AMHSMessageUI extends JFrame {
         if (selectedBodyPartType.toLowerCase().contains("file-transfer")
                 || selectedBodyPartType.toLowerCase().contains("ftbp")) {
             fields.put("ftbp-file-name", txtFTBPFileName.getText().trim());
-            fields.put("ftbp-content", txtFTBPContent.getText());
+            if (selectedFtbpAttachmentPath != null && !selectedFtbpAttachmentPath.trim().isEmpty()) {
+                fields.put("ftbp-file-path", selectedFtbpAttachmentPath);
+            } else {
+                fields.put("ftbp-content", txtFTBPContent.getText());
+            }
         } else {
             fields.remove("ftbp-file-name");
             fields.remove("ftbp-content");
+            fields.remove("ftbp-file-path");
         }
         fields.put("originator-report-request", valueOrDefault((String) comboDrReq.getSelectedItem(), "None"));
         fields.put("originating-mta-report-request",
@@ -1933,7 +1950,10 @@ public class AMHSMessageUI extends JFrame {
         String recipient = firstNonEmptyValue(defaults, "primary-recipients", "recipient");
         txtRecipient.setText(recipient != null ? recipient : "");
         txtSubject.setText(valueOrDefault(defaults.get("subject"), ""));
-        txtContent.setText(valueOrDefault(defaults.get("content"), ""));
+        String configuredContent = valueOrDefault(defaults.get("content"), "");
+        String configuredPayloadSize = valueOrDefault(defaults.get("payload-size"), "");
+        txtContent.setText(generatePayloadContentForDisplay(
+                configuredContent, configuredPayloadSize));
 
         String atsPriority = firstNonEmptyValue(defaults,
                 "ats-priority", "priority-indicator", "subject-message-priority", "priority");
@@ -1981,6 +2001,7 @@ public class AMHSMessageUI extends JFrame {
         comboCharset.setSelectedItem(charset != null ? charset : "6");
         comboContentType.setSelectedItem(valueOrDefault(defaults.get("content-type"), "22"));
         txtPayloadSize.setText(valueOrDefault(defaults.get("payload-size"), ""));
+        selectedFtbpAttachmentPath = null;
         boolean hasFileTransferBodyPart = bodyPartType != null
                 && (bodyPartType.toLowerCase().contains("file-transfer")
                         || bodyPartType.toLowerCase().contains("ftbp"));
@@ -2119,6 +2140,31 @@ public class AMHSMessageUI extends JFrame {
                         JOptionPane.ERROR_MESSAGE);
             }
         }
+    }
+
+    private String generatePayloadContentForDisplay(String originalContent, String payloadSize) {
+        if (payloadSize == null || payloadSize.trim().isEmpty()) return originalContent;
+        try {
+            int targetBytes = Integer.parseInt(payloadSize.trim());
+            return targetBytes > 0
+                    ? AMHSPayloadGeneratorService.repeatContentToPayloadSize(
+                            originalContent, targetBytes)
+                    : originalContent;
+        } catch (NumberFormatException ex) {
+            return originalContent;
+        }
+    }
+
+    private void browseFtbpAttachment() {
+        JFileChooser chooser = new JFileChooser();
+        if (chooser.showOpenDialog(this) != JFileChooser.APPROVE_OPTION) return;
+
+        File attachment = chooser.getSelectedFile();
+        selectedFtbpAttachmentPath = attachment.getAbsolutePath();
+        txtFTBPFileName.setText(attachment.getName());
+        txtFTBPContent.setText("");
+        appendOutput("Selected FTBP attachment: " + attachment.getName()
+                + " (" + attachment.length() + " bytes)");
     }
 
     // ── Config file I/O ───────────────────────────────────────────────────
