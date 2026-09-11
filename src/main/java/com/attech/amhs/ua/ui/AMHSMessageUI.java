@@ -78,6 +78,7 @@ public class AMHSMessageUI extends JFrame {
 
     // AMHS-specific fields (new)
     private JTextField txtOHI; // Optional Heading Info
+    private JTextField txtFilingTime; // ATS filing time (ddHHmm or "now")
     private JTextField txtATSPriority; // ATS Priority (KK/GG/FF/DD/SS)
     private JComboBox<String> comboEncoding;
     private JComboBox<String> comboCharset;
@@ -399,11 +400,23 @@ public class AMHSMessageUI extends JFrame {
         gbc.weightx = 0;
         panel.add(new JLabel("OHI:"), gbc);
         gbc.gridx = 1;
-        gbc.gridwidth = 3;
-        gbc.weightx = 1.0;
-        txtOHI = new JTextField("", 30);
+        gbc.gridwidth = 1;
+        gbc.weightx = 0.5;
+        txtOHI = new JTextField("", 15);
         txtOHI.setToolTipText("Optional Heading Info");
         panel.add(txtOHI, gbc);
+
+        // ATS Filing Time
+        gbc.gridx = 2;
+        gbc.gridwidth = 1;
+        gbc.weightx = 0;
+        panel.add(new JLabel("Filing Time:"), gbc);
+        gbc.gridx = 3;
+        gbc.gridwidth = 1;
+        gbc.weightx = 0.5;
+        txtFilingTime = new JTextField("", 10);
+        txtFilingTime.setToolTipText("UTC ddHHmm, 'now', or blank for automatic");
+        panel.add(txtFilingTime, gbc);
 
         // Originators Reference (editable only for subcases that define it)
         gbc.gridx = 0;
@@ -1049,7 +1062,7 @@ public class AMHSMessageUI extends JFrame {
         String atsHeaderMode = defaults.get("ats-header-mode");
         boolean rawAtsHeaderTest = atsHeaderMode != null
                 && atsHeaderMode.toLowerCase(java.util.Locale.ROOT).startsWith("raw-");
-        if (!rawAtsHeaderTest) {
+        if (!rawAtsHeaderTest && txtFilingTime.getText().trim().isEmpty()) {
             defaults.remove("filing-time");
         }
         defaults.remove("header-empty");
@@ -1426,6 +1439,7 @@ public class AMHSMessageUI extends JFrame {
         comboPriority.setSelectedItem(X400_Priority.NORMAL_PRIORITY);
         txtATSPriority.setText("FF");
         txtOHI.setText("");
+        txtFilingTime.setText("");
         comboMsgType.setSelectedItem("IPM");
         comboDrReq.setSelectedItem("NDR");
         comboRnReq.setSelectedItem("None");
@@ -1689,6 +1703,7 @@ public class AMHSMessageUI extends JFrame {
         fields.put("priority", priority != null ? priority.toString() : "NORMAL_PRIORITY");
         fields.put("ats-priority", txtATSPriority.getText().trim());
         fields.put("optional-heading-info", txtOHI.getText().trim());
+        fields.put("filing-time", txtFilingTime.getText().trim());
         if (txtOriginatorsReference.isEnabled()) {
             fields.put("originator-reference", txtOriginatorsReference.getText().trim());
         }
@@ -1980,6 +1995,7 @@ public class AMHSMessageUI extends JFrame {
         }
 
         txtOHI.setText(valueOrDefault(defaults.get("optional-heading-info"), ""));
+        txtFilingTime.setText(valueOrDefault(defaults.get("filing-time"), ""));
         String originatorsReference = valueOrDefault(defaults.get("originator-reference"), "");
         boolean hasOriginatorsReference = !originatorsReference.trim().isEmpty();
         txtOriginatorsReference.setText(hasOriginatorsReference ? originatorsReference : "");

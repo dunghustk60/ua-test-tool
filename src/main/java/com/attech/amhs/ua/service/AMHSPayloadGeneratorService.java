@@ -1175,7 +1175,8 @@ public class AMHSPayloadGeneratorService {
 
         // GeneralText charset attribute 802 is applied to BodypartGeneralText in
         // addBodyPart. It must not be added to the parent message object.
-        String conversionProhibited = amhsDefaults.get("conversion-with-loss-prohibited");
+        String conversionProhibited = firstNonEmpty(amhsDefaults,
+                "conversion-with-loss-prohibited", "conversion-with-loss");
         String implicitConversion = amhsDefaults.get("implicit-conversion");
 
         // implicit-conversion-prohibited (CTSW019)
@@ -1190,10 +1191,23 @@ public class AMHSPayloadGeneratorService {
             }
         }
 
-        // conversion-with-loss-prohibited: no dedicated constant; log for gateway
+        // conversion-with-loss-prohibited
         if (conversionProhibited != null && !conversionProhibited.trim().isEmpty()) {
-            logger.info("[CTSW017-019] conversion-with-loss-prohibited='{}' - configure at gateway level",
-                    conversionProhibited);
+            String configured = conversionProhibited.trim().toLowerCase(Locale.ROOT);
+            final int value;
+            if ("allowed".equals(configured) || "false".equals(configured)
+                    || "no".equals(configured) || "0".equals(configured)) {
+                value = 0;
+            } else if ("prohibited".equals(configured) || "true".equals(configured)
+                    || "yes".equals(configured) || "1".equals(configured)) {
+                value = 1;
+            } else {
+                throw new X400APIException("Invalid conversion-with-loss value: "
+                        + conversionProhibited + ". Expected allowed/prohibited or 0/1");
+            }
+            message.setIntParam(X400_att.X400_N_CONVERSION_WITH_LOSS_PROHIBITED, value);
+            logger.info("Set conversion-with-loss-prohibited={} (configured='{}')",
+                    value, conversionProhibited);
         }
 
         applyEncodedInformationTypes(message, amhsDefaults);
@@ -1318,12 +1332,25 @@ public class AMHSPayloadGeneratorService {
             logger.debug("Header-empty flag set; returning blank filing time");
             return "";
         }
-        String filingTime = null;
         if (amhsDefaults != null && amhsDefaults.containsKey("filing-time")) {
-            filingTime = amhsDefaults.get("filing-time");
-            return filingTime == null ? "" : filingTime.trim();
+            String configured = amhsDefaults.get("filing-time");
+            String filingTime = configured == null ? "" : configured.trim();
+
+            // Preserve deliberately malformed or empty CTSW004 raw-header stimuli.
+            if (isRawAtsHeaderMode(amhsDefaults)) {
+                return filingTime;
+            }
+            if (filingTime.isEmpty() || "now".equalsIgnoreCase(filingTime)
+                    || "auto".equalsIgnoreCase(filingTime)) {
+                return formatCurrentFilingTime();
+            }
+            if (!filingTime.matches("\\d{6}")) {
+                throw new IllegalArgumentException("Invalid ATS filing-time: " + configured
+                        + ". Expected UTC ddHHmm, 'now', or blank");
+            }
+            return filingTime;
         }
-        filingTime = formatCurrentFilingTime();
+        String filingTime = formatCurrentFilingTime();
         logger.debug("Default filing-time generated: {}", filingTime);
         return filingTime;
     }
