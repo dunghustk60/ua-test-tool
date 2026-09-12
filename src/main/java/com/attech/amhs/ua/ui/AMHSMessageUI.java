@@ -482,7 +482,7 @@ public class AMHSMessageUI extends JFrame {
         gbc.gridwidth = 1;
         gbc.weightx = 0.5;
         comboCharset = new JComboBox<>(new String[] {
-                "6", "106", "3", "4", "8"
+                "6", "1,6", "1,6,100", "106", "3", "4", "8"
         });
         comboCharset.setSelectedItem("6");
         comboCharset.setEditable(true);
@@ -2023,7 +2023,9 @@ public class AMHSMessageUI extends JFrame {
         comboEncoding.setSelectedItem(encoding);
 
         String charset = firstNonEmptyValue(defaults, "charset-reg-number", "charset-reg-numbers");
-        comboCharset.setSelectedItem(charset != null ? charset : "6");
+        boolean generalTextBody = bodyPartType != null
+                && bodyPartType.toLowerCase(java.util.Locale.ROOT).contains("general-text");
+        comboCharset.setSelectedItem(charset != null ? charset : generalTextBody ? "1,6" : "6");
         comboContentType.setSelectedItem(valueOrDefault(defaults.get("content-type"), "22"));
         txtPayloadSize.setText(valueOrDefault(defaults.get("payload-size"), ""));
         selectedFtbpAttachmentPath = null;
