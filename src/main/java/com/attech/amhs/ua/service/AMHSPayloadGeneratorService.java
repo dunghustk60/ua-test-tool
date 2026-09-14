@@ -587,6 +587,43 @@ public class AMHSPayloadGeneratorService {
     }
 
     /**
+     * Creates an MTE-only recipient. The Isode high-level envelope helper in this
+     * SDK only allocates the Recip object, so the mandatory recipient attributes
+     * are populated explicitly.
+     */
+    private void addEnvelopeOnlyRecipient(X400Msg message, String address,
+            X400Msg.DR_Request drRequest, int ipnRequest) throws X400APIException {
+        Recip envelopeRecipient = new Recip();
+        int status = X400ms.x400_ms_recipnew(
+                message, X400_att.X400_RECIP_ENVELOPE, envelopeRecipient);
+        if (status != X400_att.X400_E_NOERROR) {
+            throw new X400APIException(
+                    "Failed to create envelope recipient " + address, status);
+        }
+
+        status = X400ms.x400_ms_recipaddstrparam(
+                envelopeRecipient, X400_att.X400_S_OR_ADDRESS, address, 0);
+        if (status != X400_att.X400_E_NOERROR) {
+            throw new X400APIException(
+                    "Failed to set envelope recipient address " + address, status);
+        }
+
+        status = X400ms.x400_ms_recipaddintparam(
+                envelopeRecipient, X400_att.X400_N_REPORT_REQUEST, drRequest.dr);
+        if (status != X400_att.X400_E_NOERROR) {
+            throw new X400APIException(
+                    "Failed to set report request for envelope recipient " + address, status);
+        }
+
+        status = X400ms.x400_ms_recipaddintparam(
+                envelopeRecipient, X400_att.X400_N_NOTIFICATION_REQUEST, ipnRequest);
+        if (status != X400_att.X400_E_NOERROR) {
+            throw new X400APIException(
+                    "Failed to set notification request for envelope recipient " + address, status);
+        }
+    }
+
+    /**
      * Repeats the original content until the requested UTF-8 payload size is
      * reached. The final repetition is truncated only at a valid character
      * boundary. CTSW006 uses IA5 content, so its result is exactly targetBytes.
@@ -842,15 +879,23 @@ public class AMHSPayloadGeneratorService {
         // BCC Recipients
         String bccRecipients = amhsDefaults.get("bcc-recipients");
         if (bccRecipients != null && !bccRecipients.trim().isEmpty()) {
+            boolean separateBccEnvelope = Boolean.parseBoolean(
+                    amhsDefaults.getOrDefault("bcc-recipients-separate-envelope", "false"));
+            int ipnRequest = getIpnRequest(amhsDefaults);
             for (String recip : bccRecipients.split("[;,]")) {
                 String trimmed = recip.trim();
                 if (!trimmed.isEmpty()) {
-                    try {
+                    if (separateBccEnvelope) {
+                        message.setIPMHeadingBlindCopyRecipient(
+                                trimmed, drRequest, ipnRequest);
+                        addEnvelopeOnlyRecipient(message, trimmed, drRequest, ipnRequest);
+                        logger.info("BCC recipient configured separately: heading=BCC, envelope=true, address={}",
+                                trimmed);
+                    } else {
                         message.setBcc(trimmed,
                                 drRequest,
-                                X400Msg.IPN_NON_RECEIPT_NOTIFICATION);
-                    } catch (Exception e) {
-                        logger.warn("Failed to set BCC recipient {}: {}", trimmed, e.getMessage());
+                                ipnRequest);
+                        logger.info("BCC recipient configured: heading=BCC, envelope=true, address={}", trimmed);
                     }
                 }
             }
@@ -863,7 +908,6 @@ public class AMHSPayloadGeneratorService {
             int value = "allowed".equalsIgnoreCase(implicitConversion.trim()) ? 0 : 1;
             message.setIntParam(X400_att.X400_N_IMPLICIT_CONVERSION_PROHIBITED, value);
         }
-
         applyEncodedInformationTypes(message, amhsDefaults);
 
         // DR, RN and originating-MTA requests are per-recipient attributes. They
@@ -906,8 +950,12 @@ public class AMHSPayloadGeneratorService {
                     "recipient-precedences", "precedence", toRecipients.size());
             List<String> recipientResponsibilities = resolvePerRecipientValues(normalizedDefaults,
                     "responsibility", null, toRecipients.size());
+            boolean primaryRecipientsHeadingOnly = Boolean.parseBoolean(
+                    normalizedDefaults.getOrDefault("primary-recipients-heading-only", "false"));
             for (int i = 0; i < toRecipients.size(); i++) {
-                Recip recipientObject = message.setTo(toRecipients.get(i), drRequest, ipnRequest);
+                Recip recipientObject = primaryRecipientsHeadingOnly
+                        ? message.setIPMHeadingPrimaryRecipient(toRecipients.get(i), drRequest, ipnRequest)
+                        : message.setTo(toRecipients.get(i), drRequest, ipnRequest);
                 if (mtaReportRequest != null) {
                     addRecipientIntParam(recipientObject, X400_att.X400_N_MTA_REPORT_REQUEST,
                             mtaReportRequest, "originating MTA report request", i);
@@ -922,8 +970,9 @@ public class AMHSPayloadGeneratorService {
                     addRecipientIntParam(recipientObject, X400_att.X400_N_RESPONSIBILITY,
                             responsibility, "responsibility", i);
                 }
-                logger.info("Primary recipient {} configured: address={}, precedence={}, responsibility={}",
+                logger.info("Primary recipient {} configured: address={}, headingOnly={}, precedence={}, responsibility={}",
                         i + 1, toRecipients.get(i),
+                        primaryRecipientsHeadingOnly,
                         recipientPrecedences.isEmpty() ? "unset" : recipientPrecedences.get(i),
                         recipientResponsibilities.isEmpty() ? "unset" : recipientResponsibilities.get(i));
             }
