@@ -592,7 +592,8 @@ public class AMHSPayloadGeneratorService {
      * are populated explicitly.
      */
     private void addEnvelopeOnlyRecipient(X400Msg message, String address,
-            X400Msg.DR_Request drRequest, int ipnRequest) throws X400APIException {
+            X400Msg.DR_Request drRequest, int ipnRequest,
+            Integer mtaReportRequest) throws X400APIException {
         Recip envelopeRecipient = new Recip();
         int status = X400ms.x400_ms_recipnew(
                 message, X400_att.X400_RECIP_ENVELOPE, envelopeRecipient);
@@ -620,6 +621,15 @@ public class AMHSPayloadGeneratorService {
         if (status != X400_att.X400_E_NOERROR) {
             throw new X400APIException(
                     "Failed to set notification request for envelope recipient " + address, status);
+        }
+
+        if (mtaReportRequest != null) {
+            status = X400ms.x400_ms_recipaddintparam(
+                    envelopeRecipient, X400_att.X400_N_MTA_REPORT_REQUEST, mtaReportRequest);
+            if (status != X400_att.X400_E_NOERROR) {
+                throw new X400APIException(
+                        "Failed to set MTA report request for envelope recipient " + address, status);
+            }
         }
     }
 
@@ -881,14 +891,22 @@ public class AMHSPayloadGeneratorService {
         if (bccRecipients != null && !bccRecipients.trim().isEmpty()) {
             boolean separateBccEnvelope = Boolean.parseBoolean(
                     amhsDefaults.getOrDefault("bcc-recipients-separate-envelope", "false"));
+            boolean bccHeadingOnly = Boolean.parseBoolean(
+                    amhsDefaults.getOrDefault("bcc-recipients-heading-only", "false"));
             int ipnRequest = getIpnRequest(amhsDefaults);
+            Integer mtaReportRequest = getMtaReportRequest(amhsDefaults);
             for (String recip : bccRecipients.split("[;,]")) {
                 String trimmed = recip.trim();
                 if (!trimmed.isEmpty()) {
-                    if (separateBccEnvelope) {
+                    if (bccHeadingOnly) {
                         message.setIPMHeadingBlindCopyRecipient(
                                 trimmed, drRequest, ipnRequest);
-                        addEnvelopeOnlyRecipient(message, trimmed, drRequest, ipnRequest);
+                        logger.info("BCC recipient configured in IPM heading only: address={}", trimmed);
+                    } else if (separateBccEnvelope) {
+                        message.setIPMHeadingBlindCopyRecipient(
+                                trimmed, drRequest, ipnRequest);
+                        addEnvelopeOnlyRecipient(
+                                message, trimmed, drRequest, ipnRequest, mtaReportRequest);
                         logger.info("BCC recipient configured separately: heading=BCC, envelope=true, address={}",
                                 trimmed);
                     } else {
@@ -975,6 +993,14 @@ public class AMHSPayloadGeneratorService {
                         primaryRecipientsHeadingOnly,
                         recipientPrecedences.isEmpty() ? "unset" : recipientPrecedences.get(i),
                         recipientResponsibilities.isEmpty() ? "unset" : recipientResponsibilities.get(i));
+            }
+
+            String envelopeRecipient = normalizedDefaults.get("envelope-recipient");
+            if (envelopeRecipient != null && !envelopeRecipient.trim().isEmpty()) {
+                String trimmedEnvelopeRecipient = envelopeRecipient.trim();
+                addEnvelopeOnlyRecipient(message, trimmedEnvelopeRecipient,
+                        drRequest, ipnRequest, mtaReportRequest);
+                logger.info("Explicit MTE recipient configured: address={}", trimmedEnvelopeRecipient);
             }
 
             // ── SUBJECT ──────────────────────────────────────────────────────

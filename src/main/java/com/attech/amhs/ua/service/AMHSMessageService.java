@@ -382,6 +382,99 @@ public class AMHSMessageService {
     public Map<String, String> resolveDynamicAmhsDefaults(Map<String, String> amhsDefaults) {
         return payloadGenerator.resolveDynamicAmhsDefaults(amhsDefaults);
     }
+
+    private static List<String> splitRecipientList(String configured) {
+        List<String> recipients = new ArrayList<>();
+        if (configured == null || configured.trim().isEmpty()) {
+            return recipients;
+        }
+        for (String value : configured.split("[;,]")) {
+            String address = value.trim();
+            if (!address.isEmpty()) {
+                recipients.add(address);
+            }
+        }
+        return recipients;
+    }
+
+    /**
+     * Sends conventional email-style copies: one MTE recipient per message,
+     * all primary recipients in the heading, and only the current BCC recipient
+     * in the BCC heading of a blind-copy delivery.
+     */
+    private String sendPerRecipientCopies(String recipient, String subject, String content,
+            X400Msg.X400_Priority priority, Map<String, String> defaults)
+            throws X400APIException {
+        String primaryValue = trimToNull(defaults.get("primary-recipients"));
+        if (primaryValue == null) {
+            primaryValue = recipient;
+        }
+        List<String> primaryRecipients = splitRecipientList(primaryValue);
+
+        String bccValue = trimToNull(defaults.get("bcc-recipients"));
+        if (bccValue == null) {
+            bccValue = trimToNull(defaults.get("blind-copy-recipients"));
+        }
+        List<String> bccRecipients = splitRecipientList(bccValue);
+        if (primaryRecipients.isEmpty() && bccRecipients.isEmpty()) {
+            throw new X400APIException("Per-recipient delivery requires at least one recipient");
+        }
+
+        List<String> submissionIds = new ArrayList<>();
+        for (String target : primaryRecipients) {
+            Map<String, String> copyDefaults = new java.util.HashMap<>(defaults);
+            copyDefaults.remove("delivery-mode");
+            copyDefaults.put("primary-recipients", String.join(",", primaryRecipients));
+            copyDefaults.put("primary-recipients-heading-only", "true");
+            copyDefaults.put("envelope-recipient", target);
+            copyDefaults.remove("blind-copy-recipients");
+            copyDefaults.remove("bcc-recipients");
+            copyDefaults.remove("bcc-recipients-heading-only");
+            copyDefaults.remove("bcc-recipients-separate-envelope");
+
+            try {
+                String submissionId = sendMessage(target, subject, content, priority, copyDefaults);
+                submissionIds.add(submissionId);
+                logger.log(Level.INFO, "Submitted primary per-recipient copy for " + target
+                        + " with ID " + submissionId);
+            } catch (X400APIException e) {
+                throw new X400APIException("Failed to submit primary copy for " + target
+                        + "; previously submitted IDs: " + submissionIds + "; " + e.getMessage(),
+                        e.getNativeErrorCode());
+            } catch (RuntimeException e) {
+                throw new X400APIException("Failed to build primary copy for " + target
+                        + "; previously submitted IDs: " + submissionIds + "; " + e.getMessage());
+            }
+        }
+
+        for (String target : bccRecipients) {
+            Map<String, String> copyDefaults = new java.util.HashMap<>(defaults);
+            copyDefaults.remove("delivery-mode");
+            copyDefaults.put("primary-recipients", String.join(",", primaryRecipients));
+            copyDefaults.put("primary-recipients-heading-only", "true");
+            copyDefaults.put("bcc-recipients", target);
+            copyDefaults.put("bcc-recipients-heading-only", "true");
+            copyDefaults.put("envelope-recipient", target);
+            copyDefaults.remove("blind-copy-recipients");
+            copyDefaults.remove("bcc-recipients-separate-envelope");
+
+            try {
+                String submissionId = sendMessage(target, subject, content, priority, copyDefaults);
+                submissionIds.add(submissionId);
+                logger.log(Level.INFO, "Submitted blind-copy per-recipient copy for " + target
+                        + " with ID " + submissionId);
+            } catch (X400APIException e) {
+                throw new X400APIException("Failed to submit blind-copy for " + target
+                        + "; previously submitted IDs: " + submissionIds + "; " + e.getMessage(),
+                        e.getNativeErrorCode());
+            } catch (RuntimeException e) {
+                throw new X400APIException("Failed to build blind-copy for " + target
+                        + "; previously submitted IDs: " + submissionIds + "; " + e.getMessage());
+            }
+        }
+
+        return String.join(", ", submissionIds);
+    }
     
     /**
      * Send an X.400 message with full AMHS configuration
@@ -418,6 +511,11 @@ public class AMHSMessageService {
             && "rn".equalsIgnoreCase(trimToNull(amhsDefaults.get("message-type")))) {
         throw new X400APIException("RN submission requires either a staged CTSW014 subject IPM "
                 + "or a configured CTSW015 subject-ipm-id.");
+    }
+
+    if (amhsDefaults != null
+            && "per-recipient".equalsIgnoreCase(trimToNull(amhsDefaults.get("delivery-mode")))) {
+        return sendPerRecipientCopies(recipient, subject, content, priority, amhsDefaults);
     }
 
     String filingTimeUsed = payloadGenerator.resolveFilingTime(amhsDefaults);
